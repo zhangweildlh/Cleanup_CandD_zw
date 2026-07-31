@@ -23,6 +23,7 @@
 - `full_inventory2.csv`：C 盘完整文件清单（字段 `FullPath,Extension,SizeMB,LastWriteTime,Category,Cleanable,Reason`）。
 - `full_inventory3.csv`：D 盘完整文件清单，字段同上。
 - （`scan_inventory.ps1` 的扫描能力已并入本脚本，原独立扫描脚本已移除。）
+- **v0.3.0 健壮性加固**：扫描递归跳过 NTFS 重解析点（junction/symlink），避免 `-Root` 现场扫描遇自指 junction 无限递归崩溃；目录删除确认对象统一为目录自身（提示与实际删除一致）；扫描清单 CSV 默认写入系统临时目录（`$env:TEMP`）并被 `.gitignore` 忽略，避免污染仓库；CSV 表头大小写不敏感匹配。
 
 > 说明：两个清单 CSV 含本机文件目录结构信息，仓库当前为 public，请按需评估是否公开。
 
@@ -46,7 +47,7 @@
 
 - 远端：`zhangweildlh/Cleanup_CandD_zw`（public）
 - 默认分支：`main`
-- 最新标签：`v0.1.0`
+- 最新标签：`v0.3.0`
 
 ## 基本操作
 

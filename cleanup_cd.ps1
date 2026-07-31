@@ -57,7 +57,7 @@
 .PARAMETER OutCsv
     逐文件完整处置清单 CSV 路径（与 MD 互补，保证绝对路径不丢失）。默认 cleanup_plan_files.csv。
 .PARAMETER OutScanCsv
-    -Root 扫描输出的清单 CSV 路径。默认 ./scan_inventory_<盘符>.csv。
+    -Root 扫描输出的清单 CSV 路径。默认写入系统临时目录（$env:TEMP）的 scan_inventory_<盘符>.csv，避免污染脚本所在仓库；可用此参数显式指定。
 .PARAMETER DeleteConfirmed
     仅 Execute 模式有效：是否同时删除非安全根的"需确认"项与"系统核心降级"项（默认关闭，仅删自动清理 + 安全根已确认项）。
 .PARAMETER FullList
@@ -184,6 +184,14 @@ function Scan-Dir {
         if ($skip) { continue }
         try {
             if ([System.IO.Directory]::Exists($e)) {
+                # 跳过 NTFS 重解析点（junction/symlink），避免跟随自指 junction（如 AppData\Local\Application Data）
+                # 导致无限递归 / StackOverflowException 进程崩溃或重复枚举爆炸（尤其 -Root C:\ / D:\ 现场扫描）。
+                try {
+                    $attrs = [System.IO.Directory]::GetAttributes($e)
+                    if (($attrs -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) {
+                        continue
+                    }
+                } catch { }
                 Scan-Dir $e $Exclude $Writer $Scheme $Protected $WorkRoot $RecentDays $Counter
             }
             else {
@@ -288,18 +296,12 @@ function Read-CsvRecords {
     param([string]$Path)
 
     $bytes = [System.IO.File]::ReadAllBytes($Path)
-    $encoding = [System.Text.Encoding]::UTF8
-    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-        $encoding = [System.Text.Encoding]::UTF8
-    }
-    elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+    $encoding = [System.Text.Encoding]::UTF8   # 默认 UTF-8（含 BOM 会被自动跳过；无 BOM 也按 UTF-8 解析）
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
         $encoding = [System.Text.Encoding]::Unicode          # UTF-16 LE
     }
     elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
         $encoding = [System.Text.Encoding]::BigEndianUnicode  # UTF-16 BE
-    }
-    else {
-        $encoding = [System.Text.Encoding]::UTF8              # 无 BOM：默认按 UTF-8
     }
 
     $text = [System.IO.File]::ReadAllText($Path, $encoding)
@@ -368,7 +370,7 @@ if ($Root) {
     $resolved = Resolve-Path $Root
     $drive = ($resolved.Path.Substring(0, 1)).ToUpper()
     if ($Scheme -eq 'Auto') { $Scheme = if ($drive -eq 'C') { 'C' } else { 'D' } }
-    if (-not $OutScanCsv) { $OutScanCsv = Join-Path $PSScriptRoot ("scan_inventory_$drive.csv") }
+    if (-not $OutScanCsv) { $OutScanCsv = Join-Path $env:TEMP ("scan_inventory_$drive.csv") }
 
     Write-Output ("开始扫描: 根={0} 方案={1} 输出={2}" -f $resolved.Path, $Scheme, $OutScanCsv)
 
@@ -416,11 +418,12 @@ foreach ($cp in $CsvPaths) {
         }
         # 表头校验：缺必需列即跳过并报错
         $hdr = $data.Header
-        $idxFull = [array]::IndexOf($hdr, 'FullPath')
-        $idxClean = [array]::IndexOf($hdr, 'Cleanable')
-        $idxSize = [array]::IndexOf($hdr, 'SizeMB')
-        $idxCat = [array]::IndexOf($hdr, 'Category')
-        $idxReason = [array]::IndexOf($hdr, 'Reason')
+        $hdrLower = $hdr | ForEach-Object { $_.ToLower() }   # 大小写不敏感匹配表头，避免外部 CSV 列名大小写差异导致静默跳过
+        $idxFull = [array]::IndexOf($hdrLower, 'fullpath')
+        $idxClean = [array]::IndexOf($hdrLower, 'cleanable')
+        $idxSize = [array]::IndexOf($hdrLower, 'sizemb')
+        $idxCat = [array]::IndexOf($hdrLower, 'category')
+        $idxReason = [array]::IndexOf($hdrLower, 'reason')
         if ($idxFull -lt 0 -or $idxClean -lt 0) {
             Write-Warning ('CSV 缺少必需列(FullPath/Cleanable)，表头为 [{0}]，已跳过: {1}' -f ($hdr -join ','), $cp)
             continue
@@ -665,7 +668,7 @@ function New-MarkdownReport {
     [void]$sb.AppendLine('- 所有删除决策来源于清单（现场扫描或既有 CSV）的 `Cleanable` 字段，经"标签→处置映射层"统一处理（兼容 scan2 描述性标签与 scan3 三值标签），未硬编码任何具体文件。')
     [void]$sb.AppendLine('- 安全根目录（D:\ZW工作、D:\Tools、D:\Documents 等，含硬编码兜底）下的任何拟删除项均被拦截为二次确认，避免误删用户工作/工具/文档。')
     [void]$sb.AppendLine('- 系统核心目录（C:\Windows、C:\Program Files、C:\ProgramData 等）下的拟删除项被强制降为待确认，保证 Win11 系统与已装程序零破坏。')
-    [void]$sb.AppendLine('- 删除操作使用 `-LiteralPath`，对含 `[]{}` 等特殊字符的路径安全；目录型路径显式 `-Recurse` 且按目录二次确认；Execute 模式可用 `-WhatIf` 模拟试运行。')
+    [void]$sb.AppendLine('- 删除操作使用底层 .NET API（`[System.IO.File]::Delete` / `[System.IO.Directory]::Delete($path, $true)`）以绝对字面路径删除，对含 `[]{}` `$` 等特殊字符的路径安全；目录型路径递归删除，且按目录二次确认；Execute 模式可用 `-WhatIf` 模拟试运行。')
 
     return $sb.ToString()
 }
@@ -733,9 +736,10 @@ function Invoke-DeleteBatch {
         if (-not (Test-Path -LiteralPath $it.Path)) { $skip++; continue }
         $isDir = (Get-Item -LiteralPath $it.Path) -is [System.IO.DirectoryInfo]
         if ($isDir -and $RequireDirConfirm) {
-            $parent = Split-Path $it.Path -Parent
-            if (-not (Confirm-Dir -Dir $parent)) {
-                Write-Output ('已跳过目录 [{0}]' -f $parent)
+            # 确认对象必须是目录自身（$it.Path，$isDir 已为真）；此前误用父目录作确认/缓存对象，
+            # 导致"确认提示的目录"与"实际删除的目录"不一致。现统一为 $it.Path。
+            if (-not (Confirm-Dir -Dir $it.Path)) {
+                Write-Output ('已跳过目录 [{0}]' -f $it.Path)
                 $skip++; continue
             }
         }

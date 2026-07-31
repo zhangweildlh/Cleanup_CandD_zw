@@ -32,3 +32,8 @@ build/
 # 密钥与环境变量（防止误提交）
 .env
 .env.*
+
+# 本仓库脚本运行时产物（扫描/清理规划输出，不纳入版本控制）
+scan_inventory_*.csv
+cleanup_plan.md
+cleanup_plan_files.csv
