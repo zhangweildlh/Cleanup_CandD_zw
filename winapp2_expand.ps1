@@ -338,10 +338,15 @@ function Parse-Winapp2 {
         if ($l.Length -eq 0 -or $l[0] -eq ';' -or $l[0] -eq '#') { continue }
         if ($l.StartsWith('[') -and $l.EndsWith(']')) {
             if ($cur -and (Test-Valid $cur)) { [void]$entries.Add($cur) }
-            $name = $l.Substring(1, $l.Length - 2).Trim()
-            if ($name -like 'Winapp2*' -or $name -like 'version*') { $cur = $null; continue }
+            $rawName = $l.Substring(1, $l.Length - 2).Trim()
+            # 精确跳过元数据节（避免 -like 'Winapp2*' 误伤以 Winapp2 开头的应用节）
+            if ($rawName -eq 'Winapp2' -or $rawName -eq 'Version') { $cur = $null; continue }
+            # 节名末尾的 " *"（空格+星号）是 Winapp2 的排版标记（社区贡献条目），仅作显示用途、
+            # 由解析器静默剥离（对齐 FluentCleaner 规范），并非"默认禁用"语义——禁用语义由 Default=False 键表达。
+            # 因此只从显示名剥离 "*"，不据此设置 Default（F-3 修正：撤销原 F-1 的 *->Default=$false 误判）。
+            $name = $rawName.TrimEnd('*').TrimEnd()
             $cur = [PSCustomObject]@{
-                Name = $name.TrimEnd('*').TrimEnd()
+                Name = $name
                 LangSecRef = $null; Section = ''; SpecialDetect = ''; Warning = ''; Default = $null
                 DetectKeys = [System.Collections.ArrayList]::new()
                 DetectFiles = [System.Collections.ArrayList]::new()
