@@ -13,7 +13,8 @@
 | 全量候选清单（派生） | `winapp2_full_expanded.csv` | 6.73 MB / 32937 行 | 由扩展器从 ini 生成，`cleanup_cd` 可直接吃 |
 | 扩展器（工具） | `winapp2_expand.ps1` | — | 把 ini 展开为同构 CSV，**零改动** `cleanup_cd` |
 | 验证样例 | `winapp2_sample.ini` | — | 5 条专门构造的硬保护探针规则 |
-| 全量 DryRun 报告 | `cleanup_plan_full.md` | — | 32936 项待确认 / 1,534.58 MB |
+
+> 注：`cleanup_plan_full.md` 并非随库交付的资产，而是由下方「日常用法」第 1 步 `cleanup_cd` 现场生成的 DryRun 报告，按需命名即可。
 
 ---
 
@@ -49,6 +50,8 @@
 - **系统核心降级**：凡落在 `C:\Windows` 等的 Delete 项，强制降为「待确认」。
 - **保守默认**：本扩展器默认输出「需确认」；即使用户日后开启 `-Winapp2AutoDelete`，上述两层仍优先拦截。
 
+> **语义要点（F-3 修正）**：`-Winapp2AutoDelete` 开启后，仅当节内 `Default=False` 时仍标「需确认」，无 `Default` 键或 `Default=True` 的条目标「自动清理」——真正的禁用语义由 `Default=False` 键表达。节名末尾的 ` *`（空格+星号）仅是社区贡献条目的排版标记，由解析器静默剥离为显示名，**不参与禁用判定**；此前 F-1 误将其当作 `Default=False` 的判定，已在第二轮审计中撤销为 F-3。`[Winapp2]` / `[Version]` 等元数据节在解析时被精确跳过、不产出任何处置行。
+
 ---
 
 ## 五、如何重新生成（ini 是源，csv 可再生）
@@ -61,7 +64,7 @@
 
 可选参数：
 
-- `-Winapp2AutoDelete`：输出「自动清理」而非「需确认」（仍需双层硬保护拦截）。
+- `-Winapp2AutoDelete`：默认关闭（保守）。开启后，仅节内 `Default=False` 的条目仍标「需确认」，无 `Default` 键或 `Default=True` 的条目标「自动清理」（仍需双层硬保护拦截）。节名末尾的 ` *` 仅是排版标记，不影响此判定。
 - `-IncludeReg`：含注册表规则（仅备注，`cleanup_cd` 不删注册表）。
 - `-MaxEntries N`：限速分批，每次只处理前 N 条规则。
 
@@ -69,7 +72,7 @@
 
 ## 六、版本管理建议
 
-- **建议纳入 git（源 + 工具）**：`winapp2_full.ini`、`winapp2_expand.ps1`、`winapp2_sample.ini`、本说明文档及 `VALIDATION_DryRun.md`。
+- **建议纳入 git（源 + 工具）**：`winapp2_full.ini`、`winapp2_expand.ps1`、`winapp2_sample.ini`、本说明文档及 `tests/` 下的 Pester 测试套件。
 - `winapp2_full_expanded.csv` 为**派生产物**（可由 ini 一键再生），建议加入 `.gitignore` 以免仓库膨胀 6.7 MB；如需「成果快照」也可强纳入，请明示。
 
 ---
