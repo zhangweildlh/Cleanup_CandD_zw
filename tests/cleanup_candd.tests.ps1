@@ -13,7 +13,9 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $here '..')
 $expandScript = Join-Path $repoRoot 'winapp2_expand.ps1'
 $cleanupScript = Join-Path $repoRoot 'cleanup_cd.ps1'
-$tmp = $env:TEMP
+# 与 winapp2_expand.ps1 内部（第 77-79 行）展开 %Temp% 的来源保持一致，
+# 避免 $env:TEMP 与 [System.IO.Path]::GetTempPath() 在异常环境下不一致导致探测文件错位。
+$tmp = [System.IO.Path]::GetTempPath()
 
 # 准备探测文件（让 DetectFile 通过，使条目被判定为"已装"而产出处置行）
 $marker = Join-Path $tmp 'zw_pester_marker.txt'
@@ -23,12 +25,13 @@ New-Item -ItemType Directory -Path $dir -Force | Out-Null
 New-Item -ItemType File -Path (Join-Path $dir 'a.tmp') -Force | Out-Null
 
 function Invoke-Expand {
-    param([string]$iniContent, [switch]$AutoDelete)
+    param([string]$iniContent, [switch]$AutoDelete, [switch]$IncludeReg)
     $ini = Join-Path $tmp ('zw_pester_' + [guid]::NewGuid().ToString('N') + '.ini')
     $csv = Join-Path $tmp ('zw_pester_' + [guid]::NewGuid().ToString('N') + '.csv')
     [System.IO.File]::WriteAllText($ini, $iniContent, [System.Text.UTF8Encoding]::new($false))
     $params = @{ Winapp2Path = $ini; OutCsv = $csv }
     if ($AutoDelete) { $params['Winapp2AutoDelete'] = $true }
+    if ($IncludeReg) { $params['IncludeReg'] = $true }
     & $expandScript @params | Out-Null
     # @() 强制数组化：Import-Csv 对单行结果返回标量，其 .Count 为 $null（非 1），
     # 会导致按 Count 断言失败；包成数组后 .Count 对任意行数都可靠。
@@ -126,6 +129,57 @@ FileKey1=%Temp%\zw_pester_dir|*.tmp
     }
 }
 
+Describe 'winapp2_expand.ps1 — 边界：空节过滤 / RegKey 处理 / 通配符检测' {
+
+    It '空文件节（仅检测无清理目标）被 Test-Valid 过滤，不产生处置行' {
+        $ini = @'
+[ZW No Target]
+LangSecRef=3021
+DetectFile=%Temp%\zw_pester_marker.txt
+'@
+        $rows = Invoke-Expand -iniContent $ini
+        $rows.Count | Should Be 0
+    }
+
+    It 'RegKey 默认忽略（不开 -IncludeReg）：无 FileKey 的注册表条目不产生处置行' {
+        $ini = @'
+[ZW Reg Only]
+LangSecRef=3021
+DetectFile=%Temp%\zw_pester_marker.txt
+RegKey1=HKLM\Software\ZWTest\junk
+'@
+        $rows = Invoke-Expand -iniContent $ini
+        $rows.Count | Should Be 0
+    }
+
+    It 'RegKey 开启 -IncludeReg：注册表条目列为"需确认"备注（cleanup_cd 不删注册表）' {
+        $ini = @'
+[ZW Reg Only]
+LangSecRef=3021
+DetectFile=%Temp%\zw_pester_marker.txt
+RegKey1=HKLM\Software\ZWTest\junk
+'@
+        $rows = Invoke-Expand -iniContent $ini -IncludeReg
+        $rows | Should Not BeNullOrEmpty
+        $rows.Count | Should Be 1
+        (@($rows | Where-Object { $_.Cleanable -ne '需确认' })).Count | Should Be 0
+        (@($rows | Where-Object { $_.Reason -like '*注册表规则-仅备注*' })).Count | Should Be 1
+    }
+
+    It 'DetectFile 含通配符（目录|*.tmp）能正确判定已安装并产出处置行' {
+        $ini = @'
+[ZW Wildcard Detect]
+LangSecRef=3021
+DetectFile=%Temp%\zw_pester_dir\*.tmp
+FileKey1=%Temp%\zw_pester_dir|*.tmp
+'@
+        $rows = Invoke-Expand -iniContent $ini
+        $rows | Should Not BeNullOrEmpty
+        $rows.Count | Should Be 1
+        (@($rows | Where-Object { $_.Reason -like '*ZW Wildcard Detect' })).Count | Should Be 1
+    }
+}
+
 # ===================== cleanup_cd.ps1 =====================
 
 Describe 'cleanup_cd.ps1 — 双层硬保护 + DryRun 零删除' {
@@ -155,6 +209,36 @@ Describe 'cleanup_cd.ps1 — 双层硬保护 + DryRun 零删除' {
         ($lines | Where-Object { $_ -match '^安全根二次确认: 1 个' }).Count | Should Be 1
         ($lines | Where-Object { $_ -match '^系统核心降级待确认: 1 个' }).Count | Should Be 1
         ($lines | Where-Object { $_ -match '^已跳过\(保留/否/受保护/未知\): 1 个' }).Count | Should Be 1
+
+        Remove-Item $csv -Force -ErrorAction SilentlyContinue
+        Remove-Item $outMd -Force -ErrorAction SilentlyContinue
+        Remove-Item $outCsv -Force -ErrorAction SilentlyContinue
+    }
+
+    It '规划汇总 CSV（cleanup_plan_files.csv）的 Intent 列精确分类计数正确' {
+        $csv = Join-Path $tmp ('zw_pester_cd_' + [guid]::NewGuid().ToString('N') + '.csv')
+        $outMd = Join-Path $tmp ('zw_pester_cd_' + [guid]::NewGuid().ToString('N') + '.md')
+        $outCsv = Join-Path $tmp ('zw_pester_cd_' + [guid]::NewGuid().ToString('N') + '_files.csv')
+        $content = @'
+"FullPath","Extension","SizeMB","LastWriteTime","Category","Cleanable","Reason"
+"C:\Windows\System32\junk.dll",".dll","0","2026-01-01 00:00:00","Windows","自动清理","系统核心"
+"D:\ZW工作\mydoc.txt",".txt","0","2026-01-01 00:00:00","Applications","自动清理","安全根"
+"D:\Temp\realjunk.tmp",".tmp","0","2026-01-01 00:00:00","Applications","自动清理","普通删除"
+"D:\Temp\keep.txt",".txt","0","2026-01-01 00:00:00","Applications","保留","保留项"
+"D:\Temp\confirm.txt",".txt","0","2026-01-01 00:00:00","Applications","需确认","需确认项"
+'@
+        [System.IO.File]::WriteAllText($csv, $content, [System.Text.UTF8Encoding]::new($false))
+
+        & $cleanupScript -CsvPaths $csv -Mode DryRun -OutMd $outMd -OutCsv $outCsv | Out-Null
+
+        # 直接读产物 CSV 的 Intent 列做分类计数断言（与控制台文案解耦，更稳健）：
+        # 保留项(Keep) 不进入规划清单 CSV，故总数应为 4（Delete1 / Confirm1 / Safe1 / Guarded1）。
+        $plan = @(Import-Csv $outCsv)
+        $plan.Count | Should Be 4
+        (@($plan | Where-Object { $_.Intent -eq 'Delete' })).Count | Should Be 1
+        (@($plan | Where-Object { $_.Intent -eq 'Confirm' })).Count | Should Be 1
+        (@($plan | Where-Object { $_.Intent -eq 'Safe' })).Count | Should Be 1
+        (@($plan | Where-Object { $_.Intent -eq 'Guarded' })).Count | Should Be 1
 
         Remove-Item $csv -Force -ErrorAction SilentlyContinue
         Remove-Item $outMd -Force -ErrorAction SilentlyContinue

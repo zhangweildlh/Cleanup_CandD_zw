@@ -1,0 +1,32 @@
+name: Pester Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  pester:
+    name: Run Pester test suite (PowerShell 5.1 / Pester 3.4.0)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Pester 3.4.0
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name Pester -RequiredVersion 3.4.0 -Force -Scope CurrentUser -SkipPublisherCheck
+          Get-Module -ListAvailable Pester | Select-Object Name, Version
+
+      - name: Run Pester suite via run_pester.ps1
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+          & .\tests\run_pester.ps1 .\tests\cleanup_candd.tests.ps1
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Pester tests failed with exit code $LASTEXITCODE"
+              exit 1
+          }

@@ -40,7 +40,7 @@
 
 ## 测试
 
-- `tests/cleanup_candd.tests.ps1`：Pester 3.4.0 黑盒测试，覆盖 `winapp2_expand.ps1` 的 `Default` 键语义与 `*` 显示名剥离、F-2 元数据节跳过，以及 `cleanup_cd.ps1` 的双层硬保护 + DryRun 零删除。
+- `tests/cleanup_candd.tests.ps1`：Pester 3.4.0 黑盒测试（10 用例全绿），覆盖 `winapp2_expand.ps1` 的 `Default` 键语义与 `*` 显示名剥离、F-2 元数据节跳过、RegKey 处理（默认忽略 / `-IncludeReg` 备注）、空文件节过滤、DetectFile 通配符检测，以及 `cleanup_cd.ps1` 的双层硬保护 + DryRun 零删除 + 规划汇总 `Intent` 精确分类计数。
 - `tests/run_pester.ps1`：专用运行器，已内置环境块精简逻辑以兼容 Pester 3.4.0 的 `Add-Type` 子进程限制（环境块 ≤ 65535 字节）。
 
 ```powershell

@@ -118,9 +118,9 @@
 }
 ```
 
-### 残留风险 / 测试缺口（仍有效）
+### 残留风险 / 测试缺口
 
-- 两脚本仍无 Pester 自动化测试；本轮仅用手工探针 `test_fix.ini` + 真实库做了分类回归验证（非持续集成）。建议后续补 Pester 单测以防回归（非当前阻塞 bug）。
+- （历史记录）审计时两脚本无 Pester 自动化测试，仅用手工探针 `test_fix.ini` + 真实库做分类回归验证（非持续集成）。**该缺口已闭合**：截至提交 `9983ebc` 已补齐 `tests/cleanup_candd.tests.ps1`（初始 5 用例，后扩充至 10 用例全绿），覆盖 F-2 元数据节跳过、F-3 的 `Default` 键语义与 `*` 显示名剥离、RegKey 处理（默认忽略 / `-IncludeReg` 备注）、空文件节过滤、DetectFile 通配符检测，以及 `cleanup_cd.ps1` 双层硬保护 + 规划汇总 `Intent` 精确分类计数；由 `tests/run_pester.ps1` 运行（绕过 Pester 3.4.0 的 `Add-Type` 环境块 65535 字节上限）。
 - `Winapp2AutoDelete` 在真实库下会标 34146 条「自动清理」——该模式为显式信任开关，且仍过 cleanup_cd 双层硬保护 + 默认 DryRun；日常推荐保守模式（不开 AutoDelete），审阅 CSV 后再决定。
 
 ### 审计循环终止判定
