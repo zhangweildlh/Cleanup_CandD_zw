@@ -37,3 +37,10 @@ build/
 scan_inventory_*.csv
 cleanup_plan.md
 cleanup_plan_files.csv
+
+# 派生产物（可由 winapp2_full.ini 经 winapp2_expand.ps1 一键再生，不纳入版本控制）
+winapp2_full_expanded.csv
+
+# 真实 DryRun / 规划过程产物（本地审阅用，不纳入版本控制）
+realrun_*.md
+realrun_*.csv
