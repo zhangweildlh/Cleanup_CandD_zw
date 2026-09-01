@@ -5,6 +5,43 @@
 
 ---
 
+## [v0.5.0] - 2026-09-01
+
+### 新增（Feature）
+- **目录级自动清理（清空内容、保留目录壳）**：`cleanup_cd.ps1` 在 `Scan-Dir` 枚举阶段新增
+  `Test-AutoClearDirName` 三类命名规则判定 + `Clear-AutoDirChildren` 整批处置：
+  - 规则1：目录名**恰好等于** `temp` / `tmp` / `cache` / `.temp` / `.tmp` / `.cache`；
+  - 规则2：目录名**包含** `temp` / `tmp` / `cache`（如 `mytempdir`、`pipcache`、`templates`）；
+  - 规则3：目录名**以** `.temp` / `.tmp` / `.cache` **开头**（如 `.cache2`、`.temp_build`、`.caches`）。
+  - 命中且未例外时：把该目录的**直接子项（文件 + 子目录）整批判为 Delete、目录自身不进计划、
+    不向下递归**；删除阶段子目录走 `Directory.Delete(子目录, $true)` 整棵移除，匹配目录壳保留。
+  - 该能力是**目录级**（旧 `Test-AutoCleanDir` 仅对文件打标签、不删子目录壳），精确实现用户
+    「删其下所有子目录与文件、文件夹自身不删除」的诉求。
+- **`AI_Work_Temp` 整树例外**：新增 `Test-AutoClearExcluded`（默认例外目录 `AI_Work_Temp`），在
+  两处双重豁免——`Scan-Dir` 目录清空判定（`AI_Work_Temp` 及其内部 temp/cache 子目录不再被清空）
+  + `Classify-C` / `Classify-D` 文件分类（其下任何文件一律保留、不进自动清理）。满足用户
+  「核查 `AI_Work_Temp` 目录已例外」要求；同时 `AI_Work_Temp` 父目录 `D:\Documents` 本就是自动探测的
+  安全根，双重兜底。例外目录可通过 `cleanup_config.json` 的 `autoClearExcludeDirs` 追加。
+
+### 修复（Fix）
+- **移除旧 `Test-AutoCleanDir` 文件级判定**：旧逻辑用未锚定的「任意父目录名含 temp/tmp/cache」
+  正则，会使 `AI_Work_Temp` 内的文件被旁路例外、误判为自动清理。现由目录级 `Clear-AutoDirChildren`
+  + 文件级 `Test-AutoClearExcluded` 双重覆盖，彻底消除该旁路。
+- 测试套件由 42 用例扩充至 **45 用例**，本地 Pester **45/45 全绿**（新增 3 例：规则1 名恰为 temp、
+  规则3 以 `.cache` 开头、规则2 `AI_Work_Temp` 整树例外 + 同级普通 temp 仍清空）。
+
+### 安全提示（重要）
+- 规则2（目录名包含 temp/tmp/cache）较激进：如 `templates`、`temporary`、`pipcache` 等也会命中并被清空。
+  若需保留此类目录，请加入 `cleanup_config.json` 的 `autoClearExcludeDirs`。
+- 三层硬保护对「子项」逐条仍生效：安全根（二次确认）、系统核心（强制降级）、版本控制
+  （`.git`/`.svn`/`.hg` 永不删，连清空目录内的 `.git` 子项也跳过）；默认 DryRun + 交互确认。
+- 系统核心临时目录（如 `C:\Windows\Temp`）因位于系统核心排除根、扫描阶段即跳过，不会被自动清空，
+  符合「系统核心目录零破坏」原则（需清理须显式 `-AllowSystemJunk`）。
+
+### 文档
+- `README.md` 功能点改为目录级自动清理语义；`docs/testing.md`、`docs/upstream-tracking.md`
+  用例数 42 → 45、最新标签 v0.4.0 → v0.5.0。
+
 ## [v0.4.0] - 2026-09-01
 
 ### 新增（Feature）

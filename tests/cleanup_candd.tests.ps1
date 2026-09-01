@@ -738,6 +738,96 @@ Describe 'cleanup_cd.ps1 — 现场扫描（-Root，Scheme D 分类）' {
     Remove-Item $scanBase -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+Describe 'cleanup_cd.ps1 — 自动清理目录(清空内容,保留壳) v0.5.0' {
+
+    # 隔离扫描根：置于用户主目录下，脱离本机工作区与 %TEMP%，避免路径片段干扰断言。
+    $scanBase = Join-Path $env:USERPROFILE ('zw_pester_autoclear_' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scanBase -Force | Out-Null
+
+    It '规则1(名恰为 temp/cache/.tmp/.cache)：其下文件与子目录全删、目录自身不进计划' {
+        $d = Join-Path $scanBase ('rule1_' + [guid]::NewGuid().ToString('N'))
+        $target = Join-Path $d 'temp'          # 恰好名为 temp
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $target 'a.tmp'), 'x')
+        [System.IO.File]::WriteAllText((Join-Path $target 'b.txt'), 'x')   # 普通文件亦应被清空
+        $sub = Join-Path $target 'sub'         # 子目录亦应被删除
+        New-Item -ItemType Directory -Path $sub -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $sub 'c.tmp'), 'x')
+        $outMd = Join-Path $tmp ('zw_pester_ac1_' + [guid]::NewGuid().ToString('N') + '.md')
+        $outCsv = Join-Path $tmp ('zw_pester_ac1_' + [guid]::NewGuid().ToString('N') + '_files.csv')
+        $output = & $cleanupScript -Root $target -Scheme D -Mode DryRun -OutMd $outMd -OutCsv $outCsv
+        $code = $LASTEXITCODE
+        $output = $output | Out-String
+        $code | Should Be 0
+        $plan = @(Import-Csv $outCsv)
+        # 目录自身(temp)不出现在计划中
+        (@($plan | Where-Object { $_.FullPath -eq $target })).Count | Should Be 0
+        # 直接子文件 a.tmp / b.txt + 子目录 sub 共 3 个 Delete 行
+        (@($plan | Where-Object { $_.Intent -eq 'Delete' })).Count | Should Be 3
+        (@($plan | Where-Object { $_.FullPath -like '*\temp\a.tmp' })).Count | Should Be 1
+        (@($plan | Where-Object { $_.FullPath -like '*\temp\b.txt' })).Count | Should Be 1
+        (@($plan | Where-Object { $_.FullPath -like '*\temp\sub' })).Count | Should Be 1
+        $output | Should Match 'DryRun 模式：未删除任何文件'
+        Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $outMd -Force -ErrorAction SilentlyContinue
+        Remove-Item $outCsv -Force -ErrorAction SilentlyContinue
+    }
+
+    It '规则3(名以 .cache 开头)：其下文件全删、目录自身不进计划' {
+        $d = Join-Path $scanBase ('rule3_' + [guid]::NewGuid().ToString('N'))
+        $target = Join-Path $d '.cache_build'     # 以 .cache 开头
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $target 'x.bin'), 'x')
+        [System.IO.File]::WriteAllText((Join-Path $target 'y.log'), 'x')
+        $outMd = Join-Path $tmp ('zw_pester_ac3_' + [guid]::NewGuid().ToString('N') + '.md')
+        $outCsv = Join-Path $tmp ('zw_pester_ac3_' + [guid]::NewGuid().ToString('N') + '_files.csv')
+        $output = & $cleanupScript -Root $target -Scheme D -Mode DryRun -OutMd $outMd -OutCsv $outCsv
+        $code = $LASTEXITCODE
+        $output = $output | Out-String
+        $code | Should Be 0
+        $plan = @(Import-Csv $outCsv)
+        (@($plan | Where-Object { $_.FullPath -eq $target })).Count | Should Be 0
+        (@($plan | Where-Object { $_.Intent -eq 'Delete' })).Count | Should Be 2
+        $output | Should Match 'DryRun 模式：未删除任何文件'
+        Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $outMd -Force -ErrorAction SilentlyContinue
+        Remove-Item $outCsv -Force -ErrorAction SilentlyContinue
+    }
+
+    It '规则2(AI_Work_Temp 整树例外)：其内部 temp 子目录内容不进计划，同级普通 temp 仍清空' {
+        $d = Join-Path $scanBase ('rule2_' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+        # 例外目录：AI_Work_Temp（叶名命中例外）
+        $aiwt = Join-Path $d 'AI_Work_Temp'
+        New-Item -ItemType Directory -Path $aiwt -Force | Out-Null
+        $aiwtTemp = Join-Path $aiwt 'temp'
+        New-Item -ItemType Directory -Path $aiwtTemp -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $aiwtTemp 'inside.tmp'), 'x')
+        [System.IO.File]::WriteAllText((Join-Path $aiwt 'keep.txt'), 'k')
+        # 同级普通 temp 目录（不在 AI_Work_Temp 内）：应正常清空
+        $normTemp = Join-Path $d 'temp'
+        New-Item -ItemType Directory -Path $normTemp -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $normTemp 'del.tmp'), 'x')
+        $outMd = Join-Path $tmp ('zw_pester_ac2_' + [guid]::NewGuid().ToString('N') + '.md')
+        $outCsv = Join-Path $tmp ('zw_pester_ac2_' + [guid]::NewGuid().ToString('N') + '_files.csv')
+        $output = & $cleanupScript -Root $d -Scheme D -Mode DryRun -OutMd $outMd -OutCsv $outCsv
+        $code = $LASTEXITCODE
+        $output = $output | Out-String
+        $code | Should Be 0
+        $plan = @(Import-Csv $outCsv)
+        # AI_Work_Temp 整树不进计划（含其内部 temp 子目录与文件）
+        (@($plan | Where-Object { $_.FullPath -like '*\AI_Work_Temp*' })).Count | Should Be 0
+        # 同级普通 temp\del.tmp 应被清空（1 个 Delete）
+        (@($plan | Where-Object { $_.FullPath -like '*\temp\del.tmp' })).Count | Should Be 1
+        $output | Should Match 'DryRun 模式：未删除任何文件'
+        Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $outMd -Force -ErrorAction SilentlyContinue
+        Remove-Item $outCsv -Force -ErrorAction SilentlyContinue
+    }
+
+    Remove-Item $scanBase -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Describe 'cleanup_cd.ps1 — 编码鲁棒性与错误边界' {
 
     It 'UTF-16 LE 编码 CSV 可被正确解析（BOM 探测）' {

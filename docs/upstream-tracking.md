@@ -70,7 +70,7 @@ gh repo view bleachbit/winapp2.ini --json updatedAt,pushedAt
 **步骤 0 — 环境核验**
 ```bash
 gh auth status                                  # 必须已登录，否则停止并报错
-pwsh -File ./tests/run_pester.ps1 ./tests/cleanup_candd.tests.ps1   # 基线须全绿（当前 42/42）
+pwsh -File ./tests/run_pester.ps1 ./tests/cleanup_candd.tests.ps1   # 基线须全绿（当前 45/45）
 ```
 信号：登录成功 + 测试全绿，方可继续；否则中止。
 
@@ -106,7 +106,7 @@ diff <(grep -i '^\[' winapp2_full.ini) <(grep -i '^\[' /tmp/upstream_noncc.ini) 
 
 **步骤 7 — 回归验证（硬门槛）**
 ```bash
-pwsh -File ./tests/run_pester.ps1 ./tests/cleanup_candd.tests.ps1   # 必须 42/42 全绿
+pwsh -File ./tests/run_pester.ps1 ./tests/cleanup_candd.tests.ps1   # 必须 45/45 全绿
 ```
 信号：全绿才可提交；任一失败 → 回退步骤 5 的改动，重复，不得带红提交。
 

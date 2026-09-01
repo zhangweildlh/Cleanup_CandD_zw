@@ -255,6 +255,7 @@ function Get-DefaultConfig {
             versionControlDirs  = @('\.git\', '\.svn\', '\.hg\')
         }
         knownJunkTargets  = @()
+        autoClearExcludeDirs = @('AI_Work_Temp')
     }
     return $c
 }
@@ -286,6 +287,7 @@ function Import-CleanupConfig {
             if ($cl.versionControlDirs) { $cfg.classification.versionControlDirs = @($cl.versionControlDirs) }
         }
         if ($raw.knownJunkTargets) { $cfg.knownJunkTargets = @($raw.knownJunkTargets) }
+        if ($raw.autoClearExcludeDirs) { $cfg.autoClearExcludeDirs = @($raw.autoClearExcludeDirs) }
         # 本函数返回值会被赋值使用（$script:Config = Import-CleanupConfig ...），
         # 因此函数体内绝不能用 Write-Output 打日志——那会串入返回值并污染配置对象。
         # 日志一律走 Write-Verbose（不进成功输出流）；面向用户的提示由调用方输出。
@@ -311,6 +313,7 @@ $script:KeepExtensions     = @($Cls.keepExtensions)
 $script:WorkKeepExtensions = @($Cls.workKeepExtensions)
 $script:VersionControlDirs = @($Cls.versionControlDirs)
 $script:KnownJunkTargets   = @($script:Config.knownJunkTargets)
+$script:AutoClearExcludeDirs = @($script:Config.autoClearExcludeDirs)
 
 if ($ProtectedRoots.Count -eq 0) { $ProtectedRoots = @($script:Config.protectedRoots) }
 if ([string]::IsNullOrEmpty($WorkRoot)) {
@@ -382,28 +385,40 @@ function Test-VersionControlled {
     return $false
 }
 
-# ===================== 自动清理目录判定（v0.2.0 用户决策） =====================
-# temp/tmp/cache 目录，以及"任意父目录名包含 temp/tmp/cache"的目录，其下文件一律判为
-# 自动清理（需清空）。安全根/系统核心保护在规划阶段决策点兜底（双层硬保护），分类函数本身
-# 只负责"打标签"，不绕过决策点保护；且默认 DryRun + 交互确认，不会自动落盘删除。
-# 注意：此规则较激进——如本机工作区父目录 "AI_Work_Temp" 含 "temp" 也会被命中；实际删除
-# 仍受安全根（含自动探测的 Documents/Desktop/Downloads 等）兜底，扫描整盘时建议指定根目录。
-function Test-AutoCleanDir {
+# ===================== 自动清理目录判定（v0.5.0 用户决策） =====================
+# 三类命名规则：目录名「恰好等于 / 包含 / 以 .temp/.tmp/.cache 开头」temp|tmp|cache 时，
+# 其下「所有子目录与文件」一律判为自动清理（清空内容），但「目录自身保留（不删除）」。
+#   - 规则1：名恰为 temp / tmp / cache / .temp / .tmp / .cache
+#   - 规则2：名包含 temp / tmp / cache（如 mytempdir、pipcache、templates）
+#   - 规则3：名以 .temp / .tmp / .cache 开头（如 .cache2、.temp_build、.caches）
+# 实现位置在 Scan-Dir 枚举阶段（决策点前）：命中即「清空其内容、保留目录壳」且不向下递归。
+# 三层硬保护对「子项」逐条仍生效：
+#   - 安全根：子项落在安全根 -> 提升为二次确认（Safe），不自动删
+#   - 系统核心：子项落在系统核心 -> 强制降级待确认（Guarded）
+#   - 版本控制：子项名含 .git/.svn/.hg -> 跳过（永不删）
+# 默认 DryRun + 交互确认，不会自动落盘删除。
+function Test-AutoClearDirName {
+    param([string]$Name)
+    $n = $Name.ToLower()
+    # 规则1：恰好等于
+    if (@('temp', 'tmp', 'cache', '.temp', '.tmp', '.cache') -contains $n) { return $true }
+    # 规则2：包含 temp/tmp/cache（不区分大小写、未锚定，故 templates/temporary 等亦命中）
+    if ($n -match 'temp|tmp|cache') { return $true }
+    # 规则3：以 .temp/.tmp/.cache 开头
+    if ($n -like '.temp*' -or $n -like '.tmp*' -or $n -like '.cache*') { return $true }
+    return $false
+}
+
+# 自动清理目录例外（不触发清空）：默认含 AI_Work_Temp 及其整棵子树。
+# 来源：配置 autoClearExcludeDirs（可追加），默认 { AI_Work_Temp }。
+# 判定：路径的任一段（目录名）等于例外名 -> 该目录自身及其全部后代均例外。
+function Test-AutoClearExcluded {
     param([string]$Path)
     $p = $Path.ToLower()
-    # 标准临时/缓存目录片段（含带点的 .cache/.tmp/.caches 等常见变体）
-    if ($p -match '\\temp\\' -or $p -match '\\tmp\\' -or $p -match '\\cache\\' -or $p -match '\\caches\\' `
-        -or $p -match '\\\.cache\\' -or $p -match '\\\.tmp\\' -or $p -match '\\\.caches\\' -or $p -match '\\_cacache\\tmp') {
-        return $true
-    }
-    # 用户决策：任意父目录名包含 temp/tmp/cache（不区分大小写）→ 其下文件自动清理。
-    $dir = Split-Path -Path $p -Parent
-    while ($dir) {
-        $root = [System.IO.Path]::GetPathRoot($dir)
-        if ($dir -eq $root) { break }
-        $name = (Split-Path -Path $dir -Leaf).ToLower()
-        if ($name -match 'temp|tmp|cache') { return $true }
-        $dir = Split-Path -Path $dir -Parent
+    $segments = $p -split '[\\/]' | Where-Object { $_ }
+    foreach ($ex in $script:AutoClearExcludeDirs) {
+        $e = $ex.ToLower()
+        if ($segments -contains $e) { return $true }
     }
     return $false
 }
@@ -417,6 +432,8 @@ function Classify-C {
 
     foreach ($pr in $Protected) { if ($p.Contains($pr.ToLower())) { return @{Category = '受保护'; Cleanable = '否'; Reason = '受保护目录(禁止删除)' } } }
     if (Test-VersionControlled -LowerPath $p) { return @{Category = '版本控制数据'; Cleanable = '否'; Reason = '版本控制目录(.git/.svn/.hg)，禁止删除' } }
+    # 自动清理例外目录（默认 AI_Work_Temp 整树）：其下任何文件一律保留，不进自动清理。
+    if (Test-AutoClearExcluded -Path $fi.FullName) { return @{Category = '自动清理例外目录'; Cleanable = '否'; Reason = 'AI_Work_Temp 等例外目录(整树保留)' } }
     if ($p -match '\\\$recycle\.bin\\') { return @{Category = '回收站文件'; Cleanable = '是'; Reason = '回收站内容(可清空)' } }
 
     # 已知垃圾热点优先（微软官方认可可安全清理的标准位置）
@@ -431,7 +448,7 @@ function Classify-C {
         return @{Category = '用户配置'; Cleanable = '否'; Reason = '用户注册表配置(保留)' } }
     if (@($script:KeepExtensions) -contains $ext) { return @{Category = '应用文件'; Cleanable = '否'; Reason = '可执行/库文件(保留)' } }
     if (@($script:LogExtensions) -contains $ext) { return @{Category = '日志文件'; Cleanable = '是'; Reason = '日志文件' } }
-    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\\_cacache\\tmp') -or (Test-AutoCleanDir -Path $fi.FullName)) {
+    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\\_cacache\\tmp')) {
         return @{Category = '临时文件'; Cleanable = '是'; Reason = '临时扩展名/临时或缓存目录(可清空)' } }
     foreach ($frag in $script:CacheDirFragments) { if ($p.Contains($frag)) { return @{Category = '缓存文件'; Cleanable = '是'; Reason = '缓存目录/浏览器缓存' } } }
     if ($p -match '\\users\\[^\\]+\\appdata\\roaming' -and $ext -in @('.json', '.ini', '.cfg', '.config', '.xml', '.setting')) {
@@ -454,6 +471,8 @@ function Classify-D {
     # .git\logs 是 Git reflog（引用日志），不是"已卸载软件日志残留"——旧版此处误判会导致
     # -DeleteConfirmed 时删除 reflog，造成 Git 引用不可恢复。现统一受版本控制保护。
     if (Test-VersionControlled -LowerPath $p) { return @{Category = '版本控制数据'; Cleanable = '保留'; Reason = '版本控制目录(.git/.svn/.hg)，禁止删除' } }
+    # 自动清理例外目录（默认 AI_Work_Temp 整树）：其下任何文件一律保留，不进自动清理。
+    if (Test-AutoClearExcluded -Path $fi.FullName) { return @{Category = '自动清理例外目录'; Cleanable = '保留'; Reason = 'AI_Work_Temp 等例外目录(整树保留)' } }
     if ($p -match '\\\$recycle\.bin\\') { return @{Category = '回收站文件'; Cleanable = '自动清理'; Reason = '回收站/清理箱内容(可清空)' } }
 
     $junk = Test-KnownJunkTarget -LowerPath $p
@@ -470,8 +489,8 @@ function Classify-D {
         }
     }
     if ($fi.Length -eq 0) { return @{Category = '无用文件(空文件)'; Cleanable = '需确认'; Reason = '0字节空文件(可删)' } }
-    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\.trash-bak') -or ($p -match '\\smoke\\') -or (Test-AutoCleanDir -Path $fi.FullName)) {
-        return @{Category = '垃圾文件(临时/过程)'; Cleanable = '自动清理'; Reason = '临时/缓存目录或目录名含 temp/tmp/cache(需清空)' } }
+    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\.trash-bak') -or ($p -match '\\smoke\\')) {
+        return @{Category = '垃圾文件(临时/过程)'; Cleanable = '自动清理'; Reason = '临时/缓存扩展名或过程目录(需清空)' } }
     if (@($script:LogExtensions) -contains $ext) { return @{Category = '垃圾文件(日志)'; Cleanable = '自动清理'; Reason = '应用日志文件' } }
     if (@($script:KeepExtensions) -contains $ext) { return @{Category = '应用文件'; Cleanable = '保留'; Reason = '可执行/库文件(保留)' } }
     if ($p -match 'node_modules\\.*\\cache' -or ($p -match '\\cache\\' -and $p -match 'node_modules')) {
@@ -488,6 +507,55 @@ function Classify-D {
     return @{Category = '其他/未知'; Cleanable = '保留'; Reason = '未分类(多数保留)' }
 }
 
+# ===================== 自动清理目录：清空直接子项、保留目录壳 =====================
+# 给定命中三类命名规则的目录 $Dir，将其「直接子项（文件 + 子目录）」整批写为 Delete 行，
+# 目录自身不写入（保留壳），且不向下递归（避免重复分类）。
+#   - 子项名含 .git/.svn/.hg -> 跳过（版本控制保护，永不删）
+#   - 子项本身为 AI_Work_Temp 等例外目录 -> 跳过清空
+#   - 子项为重解析点(junction/symlink) -> 跳过（避免跟随自指 junction）
+#   - 子目录行 SizeMB 记 0（其子树体积在 DryRun 报告中略低估，删除目标完整）；
+#     文件行记真实体积与扩展名。Cleanable 标签随方案 C/D 取「是 / 自动清理」。
+function Clear-AutoDirChildren {
+    param([string]$Dir, $Writer, [string]$Scheme, $Counter)
+    $childEntries = $null
+    try { $childEntries = [System.IO.Directory]::EnumerateFileSystemEntries($Dir) } catch { $Counter.Errors++; return }
+    foreach ($c in $childEntries) {
+        try {
+            # 版本控制保护：子项名含 .git/.svn/.hg -> 跳过
+            if (Test-VersionControlled -LowerPath $c.ToLower()) { continue }
+            # 子项本身若为 AI_Work_Temp 等例外目录 -> 跳过清空
+            if (Test-AutoClearExcluded -Path $c) { continue }
+            $cIsDir = $false
+            try { $cIsDir = [System.IO.Directory]::Exists($c) } catch { $cIsDir = $false }
+            if ($cIsDir) {
+                try {
+                    $attrsC = [System.IO.Directory]::GetAttributes($c)
+                    if (($attrsC -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) { continue }
+                } catch { }
+            }
+            $ext = ''
+            $sizeMB = 0.0
+            $lwt = ''
+            if ($cIsDir) {
+                try { $lwt = ([System.IO.Directory]::GetLastWriteTime($c)).ToString('yyyy-MM-dd HH:mm:ss') } catch { $lwt = '' }
+            }
+            else {
+                $fi = [System.IO.FileInfo]$c
+                $ext = if ($fi.Extension) { $fi.Extension.ToLower() } else { '' }
+                try { $sizeMB = Format-SizeMB $fi.Length } catch { $sizeMB = 0.0 }
+                try { $lwt = $fi.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } catch { $lwt = '' }
+            }
+            $label = if ($Scheme -eq 'C') { '是' } else { '自动清理' }
+            $line = ((Quote-CsvField $c), (Quote-CsvField $ext), (Quote-CsvField $sizeMB),
+                     (Quote-CsvField $lwt), (Quote-CsvField '临时/缓存目录(清空,保留壳)'),
+                     (Quote-CsvField $label), (Quote-CsvField '目录名命中自动清理规则(temp/tmp/cache)，清空其内容、保留目录自身')) -join ','
+            $Writer.WriteLine($line)
+            $Counter.Count++
+        }
+        catch { $Counter.Errors++ }
+    }
+}
+
 # ===================== 迭代式枚举 + 即时分类写盘 =====================
 # 用显式栈代替递归：彻底规避 PowerShell 脚本递归深度上限（溢出是终止性错误，会中断整轮扫描）
 function Scan-Dir {
@@ -495,8 +563,14 @@ function Scan-Dir {
 
     $pathStack  = [System.Collections.Generic.Stack[string]]::new()
     $depthStack = [System.Collections.Generic.Stack[int]]::new()
-    $pathStack.Push($Dir)
-    $depthStack.Push(0)
+    if ((Test-AutoClearDirName -Name (Split-Path -Path $Dir -Leaf)) -and -not (Test-AutoClearExcluded -Path $Dir)) {
+        # 根目录自身命中自动清理规则：清空其直接子项，保留根目录壳，不入栈递归。
+        Clear-AutoDirChildren -Dir $Dir -Writer $Writer -Scheme $Scheme -Counter $Counter
+    }
+    else {
+        $pathStack.Push($Dir)
+        $depthStack.Push(0)
+    }
 
     while ($pathStack.Count -gt 0) {
         $current = $pathStack.Pop()
@@ -513,16 +587,22 @@ function Scan-Dir {
             foreach ($ex in $Exclude) { if (Test-PathPrefix -Path $e -Prefix $ex) { $skip = $true; break } }
             if ($skip) { continue }
 
-            try {
-                if ([System.IO.Directory]::Exists($e)) {
-                    # 跳过 NTFS 重解析点（junction/symlink），避免跟随自指 junction
-                    try {
-                        $attrs = [System.IO.Directory]::GetAttributes($e)
-                        if (($attrs -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) { continue }
-                    } catch { }
-                    $pathStack.Push($e)
-                    $depthStack.Push($depth + 1)
-                }
+                try {
+                    if ([System.IO.Directory]::Exists($e)) {
+                        # 跳过 NTFS 重解析点（junction/symlink），避免跟随自指 junction
+                        try {
+                            $attrs = [System.IO.Directory]::GetAttributes($e)
+                            if (($attrs -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) { continue }
+                        } catch { }
+                        # 自动清理目录判定（v0.5.0）：命中三类命名规则且未例外 -> 清空其内容、保留目录壳
+                        if ((Test-AutoClearDirName -Name (Split-Path -Path $e -Leaf)) -and -not (Test-AutoClearExcluded -Path $e)) {
+                            # 枚举直接子项并写入 Delete 行；不向下递归（避免重复分类）。
+                            Clear-AutoDirChildren -Dir $e -Writer $Writer -Scheme $Scheme -Counter $Counter
+                            continue
+                        }
+                        $pathStack.Push($e)
+                        $depthStack.Push($depth + 1)
+                    }
                 else {
                     $fi = [System.IO.FileInfo]$e
                     $Counter.Count++

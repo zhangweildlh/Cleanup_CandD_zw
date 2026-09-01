@@ -31,7 +31,7 @@ updated: 2026-09-01
 | 配置说明 | [docs/configuration.md](docs/configuration.md) | `cleanup_config.json` 全部字段、安全根/受保护片段/已知垃圾热点、环境变量 |
 | Winapp2 集成 | [docs/winapp2-integration.md](docs/winapp2-integration.md) | 变体裁决、F-2/F-3 语义、扩展器用法、已借鉴的 5 条 BleachBit 条目 |
 | 上游追踪 | [docs/upstream-tracking.md](docs/upstream-tracking.md) | 三个上游仓库地址、检查命令、借鉴筛选原则、**Agent 自主闭环 SOP** |
-| 测试套件 | [docs/testing.md](docs/testing.md) | Pester 运行方式、42 用例覆盖矩阵、PS 5.1 陷阱 |
+| 测试套件 | [docs/testing.md](docs/testing.md) | Pester 运行方式、45 用例覆盖矩阵、PS 5.1 陷阱 |
 
 ---
 
@@ -40,7 +40,7 @@ updated: 2026-09-01
 - **安全扫描**：`-Root` 现场递归扫描并即时分类；或 `-CsvPaths` 读取既有同构清单 CSV（兼容任意来源）。
 - **保守规划**：经「标签→处置映射层」归一为三类处置——`Delete`（自动清理）/ `Confirm`（需确认）/ `Keep`（保留）；未知标签一律保留。
 - **双层硬保护**：安全根二次确认、系统核心目录强制降级、版本控制目录（`.git`/`.svn`/`.hg`）永不删。
-- **临时/缓存目录自动清理**：路径含 `\temp\`/`\tmp\`/`\cache\`（含 `.cache` 变体）或任意父目录名含 `temp`/`tmp`/`cache` 的文件，一律判「自动清理（需清空）」；实际删除仍受安全根/系统核心双层硬保护兜底，且默认 DryRun + 交互确认（详见 CHANGELOG v0.4.0 的安全提示）。
+- **临时/缓存目录自动清理（目录级，清空内容保留壳）**：扫描枚举阶段，目录名**恰好等于** `temp`/`tmp`/`cache`/`.temp`/`.tmp`/`.cache`、**包含** `temp`/`tmp`/`cache`、或**以** `.temp`/`.tmp`/`.cache` **开头**的目录，其下「所有子目录与文件」整批判为自动清理（目录自身保留、不删除、不递归）；删除阶段子目录整棵移除。实际删除仍受安全根/系统核心/版本控制三层硬保护兜底，且默认 DryRun + 交互确认。`AI_Work_Temp` 及其整棵子树默认例外（详见 CHANGELOG v0.5.0 的安全提示）。
 - **先审后删**：默认 DryRun 只生成 Markdown 报告 + 完整 CSV；显式 `-Mode Execute` 才删，可用 `-WhatIf` 模拟。
 
 ---
@@ -85,7 +85,7 @@ updated: 2026-09-01
 1. 环境核验（`gh auth status` + 测试基线须全绿）；
 2. 取上游最近修改日期（`gh api .../commits`）并与本地比对；
 3. 拉取全文 diff，按 6 条筛选原则只借安全候选；
-4. 补入本地库 → 再生 CSV → 跑 Pester 必须 42/42 全绿（硬门槛）；
+4. 补入本地库 → 再生 CSV → 跑 Pester 必须 45/45 全绿（硬门槛）；
 5. 仅推自有 fork（`origin`），禁强推/删 `main`，提交消息注明上游 sha/日期。
 
 > 决策铁律：保持 Non-CCleaner 变体，不升级完整版；任何需放宽双层硬保护才能并入的改动一律拒绝。
@@ -94,7 +94,7 @@ updated: 2026-09-01
 
 ## 五、仓库状态与基本操作
 
-- 远端：`zhangweildlh/Cleanup_CandD_zw`（public）；默认分支：`main`；最新标签：`v0.4.0`。
+- 远端：`zhangweildlh/Cleanup_CandD_zw`（public）；默认分支：`main`；最新标签：`v0.5.0`。
 - 派生产物 `winapp2_full_expanded.csv` 已被 `.gitignore` 忽略（可由 ini 一键再生）。
 
 ```bash
