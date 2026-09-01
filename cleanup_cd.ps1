@@ -21,49 +21,66 @@
 
     分类规则从既有 full_inventory2.csv（C 盘，Cleanable∈{是,否,谨慎}）与
     full_inventory3.csv（D 盘，Cleanable∈{自动清理,需确认,保留}）反推，分两套标签体系：
-      - 方案 C（默认用于 C:）：Cleanable ∈ {是, 否, 谨慎}
+      - 方案 C（默认用于系统盘）：Cleanable ∈ {是, 否, 谨慎}
       - 方案 D（默认用于其它盘）：Cleanable ∈ {自动清理, 需确认, 保留}
 
-    两层硬保护（保证对 Win11 系统 / 已装程序 / 工作目录 / 个人文档零破坏）：
-      1) 安全根拦截：凡拟删除项落在任一"安全根目录"（默认 D:\ZW工作、D:\Tools、D:\Documents，
-         且为硬编码兜底、不可被 -SafeRoots 移除）下，一律提升为"需二次确认（按目录批量）"，即便其原本为自动清理。
-      2) 系统核心保护：凡拟删除项落在系统核心目录（C:\Windows、C:\Program Files、C:\Program Files (x86)、
-         C:\ProgramData）下，强制降为"待确认"（系统核心目录强制待确认清单），绝不自动删除。
+    三层硬保护（保证对 Windows 系统 / 已装程序 / 工作目录 / 个人文档零破坏）：
+      1) 安全根拦截：凡拟删除项落在任一"安全根目录"下，一律提升为"需二次确认（按目录批量）"，
+         即便其原本为自动清理。安全根来源（按优先级，全部可配置、无本机硬编码）：
+           a. 环境变量 CLEANUP_SAFE_ROOTS（分号分隔）
+           b. -SafeRoots 参数（追加）
+           c. 外置配置文件 cleanup_config.json 的 safeRoots
+           d. 运行时自动探测的"用户个人目录"（桌面/文档/下载/图片/视频/音乐，经注册表 Known Folder 解析）
+      2) 系统核心保护：凡拟删除项落在系统核心目录（自动探测的 Windows / Program Files /
+         Program Files (x86) / ProgramData）下，强制降为"待确认"，绝不自动删除。
+         除非显式 -AllowSystemJunk 且该项命中"已知垃圾热点"（如 Windows 更新下载缓存）。
+      3) 版本控制保护：.git / .svn / .hg 目录下的内容一律保留，永不删除（防止误删 reflog 等引用数据）。
 
-    编码健壮性：CSV 读取使用自研 StreamReader + BOM 探测 + RFC4180 引号解析，兼容 UTF-8（有/无 BOM）与 UTF-16；
-    扫描写出使用 UTF-8 带 BOM 的 StreamWriter。删除一律使用 -LiteralPath，避免特殊字符路径被通配符误解释。
+    编码健壮性：CSV 读取使用自研 StreamReader + BOM 探测 + RFC4180 引号解析，
+    兼容 UTF-8（有/无 BOM）、UTF-16 LE/BE 与 GBK（无 BOM 时按字节特征回退）；
+    扫描写出使用 UTF-8 带 BOM 的 StreamWriter。删除一律使用 -LiteralPath 与底层 .NET API，
+    避免特殊字符路径被通配符误解释。
 
 .PARAMETER Root
     扫描根目录（可选），例如 C:\ 或 D:\。提供即现场扫描并并入待清理清单。
 .PARAMETER CsvPaths
     一个或多个既有处置清单 CSV（字段见上）。可同时传入 C 盘与 D 盘清单。与 -Root 可同时提供。
 .PARAMETER Scheme
-    'C' | 'D' | 'Auto'（默认 Auto：根以 C: 开头用 C 方案，其余用 D 方案；仅对 -Root 扫描生效）。
+    'C' | 'D' | 'Auto'（默认 Auto：落在系统盘用 C 方案，其余用 D 方案；仅对 -Root 扫描生效）。
+.PARAMETER Config
+    外置配置文件路径（JSON）。默认取脚本同目录的 cleanup_config.json。缺失时回退内置默认规则。
 .PARAMETER ProtectedRoots
-    受保护目录片段（子串匹配，命中即标记"受保护/保留"）。默认含 '.workbuddy'。
+    受保护目录片段（子串匹配，命中即标记"受保护/保留"）。默认取配置文件，缺省为 @('.workbuddy')。
 .PARAMETER WorkRoot
-    工作目录根（用于"工作目录受保护文件"判定）。默认 D:\ZW工作。
+    工作目录根（用于"工作目录受保护文件"判定）。默认取配置文件的 workRoots 首项。
 .PARAMETER ExcludeRoots
     跳过枚举的目录（默认含系统核心目录，避免无意义扫描与权限报错）。传 @() 可扫描全部。
 .PARAMETER RecentDays
-    近期缓存阈值（天），默认 180。超过则不再判为"缓存-近期(保留)"。
+    近期缓存阈值（天），默认取配置文件（缺省 180）。超过则不再判为"缓存-近期(保留)"。
 .PARAMETER Mode
     DryRun（默认，仅输出，零副作用）| Execute（执行删除）。
 .PARAMETER SafeRoots
-    需二次确认的安全根目录列表。默认含 D:\ZW工作、D:\Tools、D:\Documents；
-    注意：这三个关键根为硬编码兜底，始终生效，用户传入的 -SafeRoots 仅作"追加"，无法移除它们。
+    需二次确认的安全根目录列表（**追加**，无法移除配置文件与自动探测所确定的安全根）。
 .PARAMETER OutMd
-    DryRun 输出的 Markdown 报告路径。默认 cleanup_plan.md。
+    DryRun 输出的 Markdown 报告路径。默认写入 $env:TEMP，避免污染脚本所在仓库。
 .PARAMETER OutCsv
-    逐文件完整处置清单 CSV 路径（与 MD 互补，保证绝对路径不丢失）。默认 cleanup_plan_files.csv。
+    逐文件完整处置清单 CSV 路径（与 MD 互补，保证绝对路径不丢失）。默认写入 $env:TEMP。
 .PARAMETER OutScanCsv
-    -Root 扫描输出的清单 CSV 路径。默认写入系统临时目录（$env:TEMP）的 scan_inventory_<盘符>.csv，避免污染脚本所在仓库；可用此参数显式指定。
+    -Root 扫描输出的清单 CSV 路径。默认写入 $env:TEMP 的 scan_inventory_<盘符>.csv。
 .PARAMETER DeleteConfirmed
     仅 Execute 模式有效：是否同时删除非安全根的"需确认"项与"系统核心降级"项（默认关闭，仅删自动清理 + 安全根已确认项）。
+.PARAMETER AllowSystemJunk
+    仅 Execute 模式有效：对命中"已知垃圾热点"的项，即使位于系统核心目录也不强制降级为待确认。
+    默认关闭（保守）：系统核心目录一律待确认。
 .PARAMETER FullList
     在 Markdown 中逐文件列出"需确认"与"安全根"项的绝对路径（默认关闭，改为按目录聚合 + 样本，以防 MD 过大）。
+.PARAMETER MaxDepth
+    扫描最大递归深度保护（0 = 不限制）。默认 0。全盘扫描时建议保留默认，文件系统本身受 MAX_PATH 约束。
 .PARAMETER WhatIf
     仅 Execute 模式有效：模拟删除，仅报告将删除哪些文件/目录，不实际执行删除，也不弹出交互确认。
+
+.OUTPUTS
+    退出码：0 = 成功；1 = 参数/清单错误；2 = Execute 模式下存在删除失败项。
 #>
 
 [CmdletBinding()]
@@ -75,25 +92,34 @@ param(
     [ValidateSet('C', 'D', 'Auto')]
     [string]$Scheme = 'Auto',
 
-    [string[]]$ProtectedRoots = @('.workbuddy'),
+    # 注意：此处不可命名为 $Config。脚本内部用 $script:Config 存放配置对象，
+    # 二者同为脚本作用域的同一变量；若本参数带 [string] 约束，
+    # 则把配置对象赋给 $script:Config 时会被强制字符串化（安全根/阈值全部失效）。
+    # 故命名为 $ConfigPath（配置文件路径），并保留 -Config 别名以兼容旧用法。
+    [Alias('Config')]
+    [string]$ConfigPath = '',
 
-    [string]$WorkRoot = 'D:\ZW工作',
+    [string[]]$ProtectedRoots = @(),
 
-    [string[]]$ExcludeRoots = @('C:\Windows', 'C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData'),
+    [string]$WorkRoot = '',
 
-    [int]$RecentDays = 180,
+    [string[]]$ExcludeRoots = @(),
+
+    [int]$RecentDays = -1,
 
     [ValidateSet('DryRun', 'Execute')]
     [string]$Mode = 'DryRun',
 
-    [string[]]$SafeRoots = @('D:\ZW工作', 'D:\Tools', 'D:\Documents'),
+    [string[]]$SafeRoots = @(),
 
-    [string]$OutMd = 'cleanup_plan.md',
-    [string]$OutCsv = 'cleanup_plan_files.csv',
+    [string]$OutMd = '',
+    [string]$OutCsv = '',
     [string]$OutScanCsv = '',
 
     [switch]$DeleteConfirmed,
+    [switch]$AllowSystemJunk,
     [switch]$FullList,
+    [int]$MaxDepth = 0,
     [switch]$WhatIf
 )
 
@@ -102,9 +128,259 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
-# ===================== 扫描工具函数 =====================
+$script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# ===================== 通用工具函数 =====================
 function Format-SizeMB { param($len) [math]::Round($len / 1MB, 4) }
 function Quote-CsvField { param($v) '"{0}"' -f (($v -replace '"', '""')) }
+
+# 安全的数值求和：Measure-Object 对空集合返回 $null，直接格式化会输出空白（已实测的显示缺陷）
+function Get-SafeSum {
+    param($Items, [string]$Property)
+    if ($null -eq $Items) { return 0.0 }
+    $n = @($Items).Count
+    if ($n -eq 0) { return 0.0 }
+    $s = ($Items | Measure-Object -Property $Property -Sum).Sum
+    if ($null -eq $s) { return 0.0 }
+    return [double]$s
+}
+
+# 路径前缀边界匹配：避免 "C:\Windows" 误匹配 "C:\WindowsApps" / "C:\Windows.old"
+function Test-PathPrefix {
+    param([string]$Path, [string]$Prefix)
+    if ([string]::IsNullOrEmpty($Path) -or [string]::IsNullOrEmpty($Prefix)) { return $false }
+    $prefix = $Prefix.Trim().TrimEnd('\', '/')
+    if ($Path.Equals($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $Path.StartsWith($prefix + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
+           $Path.StartsWith($prefix + '/', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# ===================== 系统路径自适应探测（去硬编码） =====================
+function Get-WindowsDirectoryPath {
+    $p = [Environment]::GetEnvironmentVariable('SystemRoot')
+    if (-not $p) { $p = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows) }
+    if (-not $p) { $p = Join-Path ([System.IO.Path]::GetPathRoot($env:SystemDrive)) 'Windows' }
+    return $p
+}
+
+function Get-SystemDriveLetter {
+    $d = [Environment]::GetEnvironmentVariable('SystemDrive')
+    if ($d) { return $d.Substring(0, 1).ToUpper() }
+    return ([System.IO.Path]::GetPathRoot([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))).Substring(0, 1).ToUpper()
+}
+
+function Get-ProgramFilesPaths {
+    $out = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in @('ProgramFiles', 'ProgramW6432Dir')) {
+        $v = [Environment]::GetEnvironmentVariable($name)
+        if ($v) { [void]$out.Add($v) }
+    }
+    $x86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    if ($x86) { [void]$out.Add($x86) }
+    # 回退：注册表（当环境变量被清理/未继承时仍可解析）
+    if ($out.Count -eq 0) {
+        try {
+            $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion')
+            if ($k) {
+                foreach ($n in @('ProgramFilesDir', 'ProgramFilesDir (x86)', 'ProgramW6432Dir')) {
+                    $v = $k.GetValue($n)
+                    if ($v) { [void]$out.Add([string]$v) }
+                }
+            }
+        } catch { }
+    }
+    # 再回退：Shell SpecialFolder
+    if ($out.Count -eq 0) {
+        foreach ($sf in @([Environment+SpecialFolder]::ProgramFiles, [Environment+SpecialFolder]::ProgramFilesX86)) {
+            $v = [Environment]::GetFolderPath($sf)
+            if ($v) { [void]$out.Add($v) }
+        }
+    }
+    return @($out | Where-Object { $_ } | Sort-Object -Unique)
+}
+
+function Get-ProgramDataPath {
+    $p = [Environment]::GetEnvironmentVariable('ProgramData')
+    if ($p) { return $p }
+    $p = [Environment]::GetEnvironmentVariable('ALLUSERSPROFILE')
+    if ($p) { return $p }
+    return [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+}
+
+# Known Folder 解析（经注册表 User Shell Folders，兼容重定向过的个人目录）
+$script:KnownFolderGuids = @{
+    Desktop   = '{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}'
+    Documents = '{FDD39AD0-238F-46AF-ADB4-6C85480369C7}'
+    Downloads = '{374DE290-123F-4565-9164-39C4925E467B}'
+    Pictures  = '{33E28130-4E1E-4676-835A-98395C3BC3BB}'
+    Videos    = '{18989B1D-99B5-455B-841C-AB7C74E4DDFC}'
+    Music     = '{4BD8D571-6D19-48D3-BE97-422220080E43}'
+}
+function Get-KnownFolderPath {
+    param([string]$Name)
+    $guid = $script:KnownFolderGuids[$Name]
+    if (-not $guid) { return $null }
+    try {
+        $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders')
+        if ($k) {
+            $v = $k.GetValue($guid)
+            if ($v) { return [Environment]::ExpandEnvironmentVariables([string]$v) }
+        }
+    } catch { }
+    # 回退：.NET SpecialFolder（不覆盖重定向场景，但保证有值）
+    $map = @{ Desktop = 'DesktopDirectory'; Documents = 'MyDocuments'; Pictures = 'MyPictures'; Videos = 'MyVideos'; Music = 'MyMusic' }
+    if ($map.ContainsKey($Name)) {
+        $v = [Environment]::GetFolderPath([Environment+SpecialFolder]::($map[$Name]))
+        if ($v) { return $v }
+    }
+    return $null
+}
+
+# ===================== 配置加载（外置优先，内置兜底） =====================
+function Get-DefaultConfig {
+    $c = [PSCustomObject]@{
+        safeRoots         = @()
+        workRoots         = @()
+        protectedRoots    = @('.workbuddy')
+        extraExcludeRoots = @()
+        recentDays        = 180
+        classification    = [PSCustomObject]@{
+            tempExtensions      = @('.tmp', '.temp', '.bak', '.old', '.dmp', '.etl', '.chk', '.gid', '.fts', '.nch')
+            logExtensions       = @('.log')
+            cacheDirFragments   = @('\cache\', '\caches\', '\temp\', '\tmp\', '\logs\', '\log\', '\crashdumps\', '\dumps\')
+            keepExtensions      = @('.exe', '.dll', '.sys', '.msi', '.ocx', '.drv', '.efi')
+            workKeepExtensions  = @('.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf', '.txt', '.md',
+                                     '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.mp3', '.mp4', '.avi',
+                                     '.zip', '.rar', '.7z', '.html', '.htm')
+            versionControlDirs  = @('\.git\', '\.svn\', '\.hg\')
+        }
+        knownJunkTargets  = @()
+    }
+    return $c
+}
+
+function Import-CleanupConfig {
+    param([string]$Path)
+    $cfg = Get-DefaultConfig
+    if ([string]::IsNullOrEmpty($Path)) {
+        $Path = Join-Path $script:ScriptDir 'cleanup_config.json'
+    }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Warning ('未找到配置文件 [{0}]，改用内置默认规则（安全根将仅由自动探测与 -SafeRoots 决定）。' -f $Path)
+        return $cfg
+    }
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($raw.safeRoots)         { $cfg.safeRoots = @($raw.safeRoots) }
+        if ($raw.workRoots)         { $cfg.workRoots = @($raw.workRoots) }
+        if ($raw.protectedRoots)    { $cfg.protectedRoots = @($raw.protectedRoots) }
+        if ($raw.extraExcludeRoots) { $cfg.extraExcludeRoots = @($raw.extraExcludeRoots) }
+        if ($raw.recentDays)        { $cfg.recentDays = [int]$raw.recentDays }
+        if ($raw.classification) {
+            $cl = $raw.classification
+            if ($cl.tempExtensions)     { $cfg.classification.tempExtensions = @($cl.tempExtensions) }
+            if ($cl.logExtensions)      { $cfg.classification.logExtensions = @($cl.logExtensions) }
+            if ($cl.cacheDirFragments)  { $cfg.classification.cacheDirFragments = @($cl.cacheDirFragments) }
+            if ($cl.keepExtensions)     { $cfg.classification.keepExtensions = @($cl.keepExtensions) }
+            if ($cl.workKeepExtensions) { $cfg.classification.workKeepExtensions = @($cl.workKeepExtensions) }
+            if ($cl.versionControlDirs) { $cfg.classification.versionControlDirs = @($cl.versionControlDirs) }
+        }
+        if ($raw.knownJunkTargets) { $cfg.knownJunkTargets = @($raw.knownJunkTargets) }
+        # 本函数返回值会被赋值使用（$script:Config = Import-CleanupConfig ...），
+        # 因此函数体内绝不能用 Write-Output 打日志——那会串入返回值并污染配置对象。
+        # 日志一律走 Write-Verbose（不进成功输出流）；面向用户的提示由调用方输出。
+        Write-Verbose ('已加载配置文件: {0}' -f $Path)
+    }
+    catch {
+        Write-Warning ('配置文件解析失败，改用内置默认规则: {0} - {1}' -f $Path, $_.Exception.Message)
+    }
+    return $cfg
+}
+
+$script:Config = Import-CleanupConfig -Path $ConfigPath
+Write-Output ('配置就绪: 安全根 {0} 项 / 受保护片段 {1} 项 / 已知垃圾热点 {2} 条 / 近期缓存阈值 {3} 天' -f
+    @($script:Config.safeRoots).Count, @($script:Config.protectedRoots).Count,
+    @($script:Config.knownJunkTargets).Count, $script:Config.recentDays)
+
+# ---- 分类规则（来自配置，可被 -ProtectedRoots / -RecentDays 覆盖）----
+$Cls = $script:Config.classification
+$script:TempExtensions     = @($Cls.tempExtensions)
+$script:LogExtensions      = @($Cls.logExtensions)
+$script:CacheDirFragments  = @($Cls.cacheDirFragments)
+$script:KeepExtensions     = @($Cls.keepExtensions)
+$script:WorkKeepExtensions = @($Cls.workKeepExtensions)
+$script:VersionControlDirs = @($Cls.versionControlDirs)
+$script:KnownJunkTargets   = @($script:Config.knownJunkTargets)
+
+if ($ProtectedRoots.Count -eq 0) { $ProtectedRoots = @($script:Config.protectedRoots) }
+if ([string]::IsNullOrEmpty($WorkRoot)) {
+    if ($script:Config.workRoots.Count -gt 0) { $WorkRoot = [string]$script:Config.workRoots[0] }
+}
+if ($RecentDays -lt 0) { $RecentDays = [int]$script:Config.recentDays }
+
+# ---- 系统核心目录（自动探测，无硬编码盘符）----
+$script:SystemDriveLetter = Get-SystemDriveLetter
+$SystemProtectedRoots = @(
+    (Get-WindowsDirectoryPath)
+) + (Get-ProgramFilesPaths) + @(
+    (Get-ProgramDataPath)
+) | Where-Object { $_ } | Sort-Object -Unique
+
+if ($ExcludeRoots.Count -eq 0) {
+    $ExcludeRoots = @($SystemProtectedRoots) + @($script:Config.extraExcludeRoots) | Where-Object { $_ } | Sort-Object -Unique
+}
+
+# ---- 安全根（配置 + 自动探测 + 参数追加；自动探测项不可被移除）----
+$AutoDetectedSafeRoots = @()
+foreach ($n in @('Desktop', 'Documents', 'Downloads', 'Pictures', 'Videos', 'Music')) {
+    $p = Get-KnownFolderPath -Name $n
+    if ($p) { $AutoDetectedSafeRoots += $p }
+}
+$AutoDetectedSafeRoots = @($AutoDetectedSafeRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object -Unique)
+
+# 环境变量优先级最高（便于 CI / 临时覆写）
+$EnvSafeRoots = @()
+$envVal = [Environment]::GetEnvironmentVariable('CLEANUP_SAFE_ROOTS')
+if ($envVal) { $EnvSafeRoots = @($envVal -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+
+$EssentialSafeRoots = @($EnvSafeRoots) + @($script:Config.safeRoots) + @($AutoDetectedSafeRoots) |
+                      Where-Object { $_ } | Sort-Object -Unique
+$SafeRoots = @($EssentialSafeRoots) + @($SafeRoots) | Where-Object { $_ } | Sort-Object -Unique
+
+# 安全根 / 系统核心 / 排除根 的规范化前缀（供边界匹配）
+$script:SafeRootList   = @($SafeRoots)
+$script:SystemRootList = @($SystemProtectedRoots)
+$script:ExcludeList    = @($ExcludeRoots)
+
+function Test-SafeRootMatch {
+    param([string]$Path)
+    foreach ($r in $script:SafeRootList) { if (Test-PathPrefix -Path $Path -Prefix $r) { return $r } }
+    return $null
+}
+function Test-SystemProtected {
+    param([string]$Path)
+    foreach ($r in $script:SystemRootList) { if (Test-PathPrefix -Path $Path -Prefix $r) { return $true } }
+    return $false
+}
+
+# ===================== 已知垃圾热点匹配 =====================
+function Test-KnownJunkTarget {
+    param([string]$LowerPath)
+    foreach ($t in $script:KnownJunkTargets) {
+        $frag = [string]$t.fragment
+        if ($frag -and $LowerPath.Contains($frag.ToLower())) { return $t }
+    }
+    return $null
+}
+
+# ===================== 版本控制保护（防止误删 .git reflog 等引用数据） =====================
+function Test-VersionControlled {
+    param([string]$LowerPath)
+    foreach ($d in $script:VersionControlDirs) {
+        if ($LowerPath.Contains($d.ToLower())) { return $true }
+    }
+    return $false
+}
 
 # ===================== 方案 C 分类（Cleanable: 是/否/谨慎） =====================
 function Classify-C {
@@ -113,19 +389,25 @@ function Classify-C {
     $ext = if ($fi.Extension) { $fi.Extension.ToLower() } else { '' }
     $name = $fi.Name.ToLower()
 
+    foreach ($pr in $Protected) { if ($p.Contains($pr.ToLower())) { return @{Category = '受保护'; Cleanable = '否'; Reason = '受保护目录(禁止删除)' } } }
+    if (Test-VersionControlled -LowerPath $p) { return @{Category = '版本控制数据'; Cleanable = '否'; Reason = '版本控制目录(.git/.svn/.hg)，禁止删除' } }
     if ($p -match '\\\$recycle\.bin\\') { return @{Category = '回收站文件'; Cleanable = '是'; Reason = '回收站内容(可清空)' } }
-    foreach ($pr in $Protected) { if ($p.Contains($pr.ToLower())) { return @{Category = '受保护'; Cleanable = '否'; Reason = '受保护目录(规则5,禁止删除)' } } }
+
+    # 已知垃圾热点优先（微软官方认可可安全清理的标准位置）
+    $junk = Test-KnownJunkTarget -LowerPath $p
+    if ($junk) { return @{Category = [string]$junk.category; Cleanable = [string]$junk.cleanable; Reason = [string]$junk.reason } }
+
     if ($p -match '\\network\\cookies' -or $p -match '\\cookies$' -or $p -match '\\user data\\default\\bookmarks' -or $p -match 'webview' -or $p -match '\\history$') {
         return @{Category = '浏览数据'; Cleanable = '谨慎'; Reason = '浏览历史/cookie(谨慎清理)' } }
     if ($p -match 'explorer\\iconcache_' -or $p -match 'thumbcache') { return @{Category = '缩略图缓存'; Cleanable = '是'; Reason = '缩略图/图标缓存数据库' } }
     if ($p -match 'crashdumps\\.*\.dmp$') { return @{Category = '崩溃转储'; Cleanable = '是'; Reason = '崩溃转储文件' } }
     if ($name -eq 'ntuser.dat' -or $name -like 'ntuser.dat.*' -or $name -eq 'usrclass.dat' -or $name -like 'usrclass.dat.*') {
         return @{Category = '用户配置'; Cleanable = '否'; Reason = '用户注册表配置(保留)' } }
-    if (@('.exe', '.dll', '.sys', '.msi', '.ocx') -contains $ext) { return @{Category = '应用文件'; Cleanable = '否'; Reason = '可执行/库文件(保留)' } }
-    if ($ext -eq '.log') { return @{Category = '日志文件'; Cleanable = '是'; Reason = '日志文件' } }
-    if ($ext -in @('.tmp', '.temp', '.bak') -or $p -match '\\temp\\' -or $p -match '\\tmp\\' -or $p -match '\\_cacache\\tmp') {
+    if (@($script:KeepExtensions) -contains $ext) { return @{Category = '应用文件'; Cleanable = '否'; Reason = '可执行/库文件(保留)' } }
+    if (@($script:LogExtensions) -contains $ext) { return @{Category = '日志文件'; Cleanable = '是'; Reason = '日志文件' } }
+    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\\temp\\') -or ($p -match '\\tmp\\') -or ($p -match '\\_cacache\\tmp')) {
         return @{Category = '临时文件'; Cleanable = '是'; Reason = '临时扩展名/临时目录' } }
-    if ($p -match '\\cache\\' -or $p -match '\.cache' -or $p -match 'app\\cache') { return @{Category = '缓存文件'; Cleanable = '是'; Reason = '缓存目录/浏览器缓存' } }
+    foreach ($frag in $script:CacheDirFragments) { if ($p.Contains($frag)) { return @{Category = '缓存文件'; Cleanable = '是'; Reason = '缓存目录/浏览器缓存' } } }
     if ($p -match '\\users\\[^\\]+\\appdata\\roaming' -and $ext -in @('.json', '.ini', '.cfg', '.config', '.xml', '.setting')) {
         return @{Category = '应用配置'; Cleanable = '否'; Reason = '应用配置数据(保留)' } }
     if ($p -match '\\users\\[^\\]+\\appdata\\local') { return @{Category = '应用本地数据'; Cleanable = '否'; Reason = '应用本地数据(多数保留)' } }
@@ -142,109 +424,98 @@ function Classify-D {
     $ext = if ($fi.Extension) { $fi.Extension.ToLower() } else { '' }
     $name = $fi.Name.ToLower()
 
+    foreach ($pr in $Protected) { if ($p.Contains($pr.ToLower())) { return @{Category = '受保护'; Cleanable = '保留'; Reason = '受保护目录(禁止删除)' } } }
+    # .git\logs 是 Git reflog（引用日志），不是"已卸载软件日志残留"——旧版此处误判会导致
+    # -DeleteConfirmed 时删除 reflog，造成 Git 引用不可恢复。现统一受版本控制保护。
+    if (Test-VersionControlled -LowerPath $p) { return @{Category = '版本控制数据'; Cleanable = '保留'; Reason = '版本控制目录(.git/.svn/.hg)，禁止删除' } }
     if ($p -match '\\\$recycle\.bin\\') { return @{Category = '回收站文件'; Cleanable = '自动清理'; Reason = '回收站/清理箱内容(可清空)' } }
-    foreach ($pr in $Protected) { if ($p.Contains($pr.ToLower())) { return @{Category = '受保护'; Cleanable = '保留'; Reason = '受保护目录(规则5,禁止删除)' } } }
+
+    $junk = Test-KnownJunkTarget -LowerPath $p
+    if ($junk) { return @{Category = [string]$junk.category; Cleanable = [string]$junk.cleanable; Reason = [string]$junk.reason } }
+
     if ($p -match 'tencent files' -or $p -match 'wechat files') {
         if ($p -match '\\log\\' -or $p -match '\.qqxlog$' -or $p -match '\\cache\\') {
             return @{Category = '通讯软件缓存/日志'; Cleanable = '需确认'; Reason = '通讯软件缓存/日志(需确认避免误删)' } }
         return @{Category = '通讯软件用户数据'; Cleanable = '保留'; Reason = '通讯软件用户数据/接收文件(禁止误删)' }
     }
-    if ($WorkRoot -and $p.StartsWith($WorkRoot.ToLower())) {
-        if (@('.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf', '.txt', '.md', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.mp3', '.mp4', '.avi', '.zip', '.rar', '.7z', '.html', '.htm') -contains $ext) {
-            return @{Category = '工作目录受保护文件'; Cleanable = '保留'; Reason = 'ZW工作目录禁止删除类型(Office/图片/音视频/TXT/MD/PDF/网页/压缩)' }
+    if ($WorkRoot -and (Test-PathPrefix -Path $fi.FullName -Prefix $WorkRoot)) {
+        if (@($script:WorkKeepExtensions) -contains $ext) {
+            return @{Category = '工作目录受保护文件'; Cleanable = '保留'; Reason = '工作目录禁止删除类型(Office/图片/音视频/TXT/MD/PDF/网页/压缩)' }
         }
     }
     if ($fi.Length -eq 0) { return @{Category = '无用文件(空文件)'; Cleanable = '需确认'; Reason = '0字节空文件(可删)' } }
-    if ($p -match '\\\.git\\logs\\') { return @{Category = '垃圾文件(已卸载日志残留)'; Cleanable = '需确认'; Reason = '疑似已卸载软件日志(需确认)' } }
-    if ($p -match 'node_modules\\.*\\cache' -or ($p -match '\\cache\\' -and $p -match 'node_modules')) {
-        return @{Category = '垃圾文件(已卸载缓存残留)'; Cleanable = '需确认'; Reason = '疑似已卸载软件缓存(需确认)' } }
-    if (@('.exe', '.msi') -contains $ext -and ($p -match '\\build\\' -or $p -match '\\temp\\' -or $p -match 'uninst' -or $p -match 'dmcp')) {
-        return @{Category = '疑似已卸载程序残留'; Cleanable = '需确认'; Reason = '疑似已卸载软件程序文件(需确认后再删)' } }
-    if ($ext -in @('.tmp', '.temp', '.bak') -or $p -match '\\tmp\\' -or $p -match '\\temp\\' -or $p -match '\.trash-bak' -or $p -match '\\smoke\\') {
+    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\\tmp\\') -or ($p -match '\\temp\\') -or ($p -match '\.trash-bak') -or ($p -match '\\smoke\\')) {
         return @{Category = '垃圾文件(临时/过程)'; Cleanable = '自动清理'; Reason = '临时目录/临时过程文件' } }
-    if ($ext -eq '.log') { return @{Category = '垃圾文件(日志)'; Cleanable = '自动清理'; Reason = '应用日志文件' } }
-    if (@('.exe', '.dll', '.sys', '.msi', '.ocx') -contains $ext) { return @{Category = '应用文件'; Cleanable = '保留'; Reason = '可执行/库文件(保留)' } }
-    if ($p -match '\\cache\\' -or $p -match '\.cache') {
-        $age = (Get-Date) - $fi.LastWriteTime
-        if ($age.TotalDays -le $RecentDays) { return @{Category = '缓存-近期(保留)'; Cleanable = '保留'; Reason = ('近期缓存(<{0}天)' -f $RecentDays) } }
+    if (@($script:LogExtensions) -contains $ext) { return @{Category = '垃圾文件(日志)'; Cleanable = '自动清理'; Reason = '应用日志文件' } }
+    if (@($script:KeepExtensions) -contains $ext) { return @{Category = '应用文件'; Cleanable = '保留'; Reason = '可执行/库文件(保留)' } }
+    if ($p -match 'node_modules\\.*\\cache' -or ($p -match '\\cache\\' -and $p -match 'node_modules')) {
+        return @{Category = '依赖缓存(node_modules)'; Cleanable = '需确认'; Reason = '包依赖缓存，重装可恢复(需确认)' } }
+    foreach ($frag in $script:CacheDirFragments) {
+        if ($p.Contains($frag)) {
+            $age = (Get-Date) - $fi.LastWriteTime
+            if ($age.TotalDays -le $RecentDays) { return @{Category = '缓存-近期(保留)'; Cleanable = '保留'; Reason = ('近期缓存(<{0}天)' -f $RecentDays) } }
+            return @{Category = '缓存-陈旧(可清理)'; Cleanable = '需确认'; Reason = ('陈旧缓存(>{0}天)' -f $RecentDays) }
+        }
     }
     if ($p -match '\\users\\[^\\]+\\(documents|pictures|desktop|videos|music|contacts|links|downloads)\\') {
         return @{Category = '用户重要数据'; Cleanable = '保留'; Reason = '用户文档/媒体(保留)' } }
     return @{Category = '其他/未知'; Cleanable = '保留'; Reason = '未分类(多数保留)' }
 }
 
-# ===================== 递归枚举 + 即时分类写盘 =====================
+# ===================== 迭代式枚举 + 即时分类写盘 =====================
+# 用显式栈代替递归：彻底规避 PowerShell 脚本递归深度上限（溢出是终止性错误，会中断整轮扫描）
 function Scan-Dir {
-    param($Dir, $Exclude, $Writer, $Scheme, $Protected, $WorkRoot, $RecentDays, $Counter)
-    $entries = $null
-    try { $entries = [System.IO.Directory]::EnumerateFileSystemEntries($Dir) } catch { return }
-    foreach ($e in $entries) {
-        $skip = $false
-        foreach ($ex in $Exclude) { if ($e -like "$ex*") { $skip = $true; break } }
-        if ($skip) { continue }
-        try {
-            if ([System.IO.Directory]::Exists($e)) {
-                # 跳过 NTFS 重解析点（junction/symlink），避免跟随自指 junction（如 AppData\Local\Application Data）
-                # 导致无限递归 / StackOverflowException 进程崩溃或重复枚举爆炸（尤其 -Root C:\ / D:\ 现场扫描）。
-                try {
-                    $attrs = [System.IO.Directory]::GetAttributes($e)
-                    if (($attrs -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) {
-                        continue
+    param($Dir, $Exclude, $Writer, $Scheme, $Protected, $WorkRoot, $RecentDays, $Counter, $MaxDepth)
+
+    $pathStack  = [System.Collections.Generic.Stack[string]]::new()
+    $depthStack = [System.Collections.Generic.Stack[int]]::new()
+    $pathStack.Push($Dir)
+    $depthStack.Push(0)
+
+    while ($pathStack.Count -gt 0) {
+        $current = $pathStack.Pop()
+        $depth   = $depthStack.Pop()
+
+        if ($MaxDepth -gt 0 -and $depth -gt $MaxDepth) { $Counter.DepthSkipped++; continue }
+
+        $entries = $null
+        try { $entries = [System.IO.Directory]::EnumerateFileSystemEntries($current) } catch { $Counter.Errors++; continue }
+
+        foreach ($e in $entries) {
+            # 排除目录：边界匹配，避免 "C:\Windows" 误排除 "C:\WindowsApps"
+            $skip = $false
+            foreach ($ex in $Exclude) { if (Test-PathPrefix -Path $e -Prefix $ex) { $skip = $true; break } }
+            if ($skip) { continue }
+
+            try {
+                if ([System.IO.Directory]::Exists($e)) {
+                    # 跳过 NTFS 重解析点（junction/symlink），避免跟随自指 junction
+                    try {
+                        $attrs = [System.IO.Directory]::GetAttributes($e)
+                        if (($attrs -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint) { continue }
+                    } catch { }
+                    $pathStack.Push($e)
+                    $depthStack.Push($depth + 1)
+                }
+                else {
+                    $fi = [System.IO.FileInfo]$e
+                    $Counter.Count++
+                    if ($Scheme -eq 'C') { $r = Classify-C $fi $Protected } else { $r = Classify-D $fi $Protected $WorkRoot $RecentDays }
+                    $sizeMB = Format-SizeMB $fi.Length
+                    $lwt = $fi.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+                    $ext = if ($fi.Extension) { $fi.Extension.ToLower() } else { '' }
+                    $line = ((Quote-CsvField $fi.FullName), (Quote-CsvField $ext), (Quote-CsvField $sizeMB),
+                             (Quote-CsvField $lwt), (Quote-CsvField $r.Category), (Quote-CsvField $r.Cleanable),
+                             (Quote-CsvField $r.Reason)) -join ','
+                    $Writer.WriteLine($line)
+                    if (($Counter.Count % 5000) -eq 0) {
+                        Write-Progress -Activity "扫描 $Scheme 方案" -Status "$($Counter.Count) 个文件" -CurrentOperation $e
                     }
-                } catch { }
-                Scan-Dir $e $Exclude $Writer $Scheme $Protected $WorkRoot $RecentDays $Counter
-            }
-            else {
-                $fi = [System.IO.FileInfo]$e
-                $Counter.Count++
-                if ($Scheme -eq 'C') { $r = Classify-C $fi $Protected } else { $r = Classify-D $fi $Protected $WorkRoot $RecentDays }
-                $sizeMB = Format-SizeMB $fi.Length
-                $lwt = $fi.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
-                $ext = if ($fi.Extension) { $fi.Extension.ToLower() } else { '' }
-                $line = ((Quote-CsvField $fi.FullName), (Quote-CsvField $ext), (Quote-CsvField $sizeMB),
-                         (Quote-CsvField $lwt), (Quote-CsvField $r.Category), (Quote-CsvField $r.Cleanable),
-                         (Quote-CsvField $r.Reason)) -join ','
-                $Writer.WriteLine($line)
-                if (($Counter.Count % 5000) -eq 0) {
-                    Write-Progress -Activity "扫描 $Scheme 方案" -Status "$($Counter.Count) 个文件" -CurrentOperation $e
                 }
             }
+            catch { $Counter.Errors++ }
         }
-        catch { }
     }
-}
-
-# ===================== 安全根 / 系统核心保护（清理侧，硬编码兜底） =====================
-# 关键安全根（硬编码兜底，始终生效，不可被 -SafeRoots 覆盖移除）
-$EssentialSafeRoots = @('D:\ZW工作', 'D:\Tools', 'D:\Documents')
-$SafeRoots = ($EssentialSafeRoots + @($SafeRoots)) | Sort-Object -Unique
-
-# 系统核心保护目录（硬编码）：命中即强制降为"待确认"，绝不自动删除
-$SystemProtectedRoots = @('C:\Windows', 'C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData')
-
-# 安全根规范化（带末尾反斜杠，供前缀匹配）。使用 StartsWith 大小写不敏感，避免 -like 通配符陷阱。
-$safeRootPatterns = @()
-foreach ($r in $SafeRoots) {
-    $norm = ($r.Trim().TrimEnd('\') + '\')
-    $safeRootPatterns += [PSCustomObject]@{ Raw = $r.Trim(); Pattern = $norm }
-}
-
-function Test-SafeRootMatch {
-    param([string]$Path)
-    foreach ($s in $safeRootPatterns) {
-        if ($Path.StartsWith($s.Pattern, [System.StringComparison]::OrdinalIgnoreCase)) { return $s.Raw }
-    }
-    return $null
-}
-
-# 系统核心目录规范化与匹配
-$systemPatterns = $SystemProtectedRoots | ForEach-Object { ($_.Trim().TrimEnd('\') + '\') }
-function Test-SystemProtected {
-    param([string]$Path)
-    foreach ($p in $systemPatterns) {
-        if ($Path.StartsWith($p, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
-    }
-    return $false
 }
 
 # ===================== 标签 -> 处置 映射层 =====================
@@ -252,19 +523,13 @@ function Test-SystemProtected {
 #   - scan3（D 盘）：自动清理 / 需确认 / 保留 / 否 / 受保护
 #   - scan2（C 盘）：是（可清理）/ 否（保留）/ 谨慎（需人工确认）
 # 未知取值一律保留（保守默认，避免误删）。
-$DeleteLabels = @(
-    '自动清理',   # scan3：直接可清理
-    '是'          # scan2：C 盘标记为"是"= 可清理
-)
-$ConfirmLabels = @(
-    '需确认',     # scan3：需用户确认
-    '谨慎'        # scan2：C 盘标记为"谨慎"= 需人工确认
-)
+$script:DeleteLabels = @('自动清理', '是')
+$script:ConfirmLabels = @('需确认', '谨慎')
 
 function Map-Cleanable {
     param([string]$Label)
-    if ($DeleteLabels -contains $Label) { return 'Delete' }
-    if ($ConfirmLabels -contains $Label) { return 'Confirm' }
+    if (@($script:DeleteLabels) -contains $Label) { return 'Delete' }
+    if (@($script:ConfirmLabels) -contains $Label) { return 'Confirm' }
     return 'Keep'   # 保留 / 否 / 受保护 / 未知 -> 一律保留
 }
 
@@ -290,21 +555,33 @@ function Convert-SizeToDouble {
     try { return [double]($Value.ToString()) } catch { return 0.0 }
 }
 
-# ===================== 健壮 CSV 读取（轻量返回字符串数组） =====================
-# 自研 RFC4180 引号解析 + BOM 探测，兼容 UTF-8（有/无 BOM）与 UTF-16 LE/BE。
+# ===================== 健壮 CSV 读取（RFC4180 + BOM 探测 + GBK 回退） =====================
+function Get-TextContent {
+    param([string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::Unicode)
+    }
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+        return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::BigEndianUnicode)
+    }
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        return [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false))
+    }
+    # UTF-8 无 BOM：先按 UTF-8 严格解码验证，失败则回退 GBK（中文 Windows 常见遗留编码）
+    try {
+        $strict = [System.Text.UTF8Encoding]::new($false, $true)
+        return $strict.GetString($bytes)
+    } catch {
+        try { return [System.Text.Encoding]::GetEncoding('GB18030').GetString($bytes) }
+        catch { return [System.Text.Encoding]::Default.GetString($bytes) }
+    }
+}
+
 function Read-CsvRecords {
     param([string]$Path)
 
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
-    $encoding = [System.Text.Encoding]::UTF8   # 默认 UTF-8（含 BOM 会被自动跳过；无 BOM 也按 UTF-8 解析）
-    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
-        $encoding = [System.Text.Encoding]::Unicode          # UTF-16 LE
-    }
-    elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
-        $encoding = [System.Text.Encoding]::BigEndianUnicode  # UTF-16 BE
-    }
-
-    $text = [System.IO.File]::ReadAllText($Path, $encoding)
+    $text = Get-TextContent -Path $Path
 
     $records = [System.Collections.Generic.List[string[]]]::new()
     $field = [System.Text.StringBuilder]::new()
@@ -363,13 +640,17 @@ function Read-CsvRecords {
     return [PSCustomObject]@{ Header = $header; Records = $clean }
 }
 
+# ===================== 默认产物路径（写入 TEMP，避免污染仓库） =====================
+if ([string]::IsNullOrEmpty($OutMd))  { $OutMd  = Join-Path $env:TEMP 'cleanup_plan.md' }
+if ([string]::IsNullOrEmpty($OutCsv)) { $OutCsv = Join-Path $env:TEMP 'cleanup_plan_files.csv' }
+
 # ===================== 主流程入口：扫描（若提供 -Root） =====================
 $scanGenerated = $null
 if ($Root) {
     if (-not (Test-Path -LiteralPath $Root)) { Write-Error ("根目录不存在: {0}" -f $Root); exit 1 }
     $resolved = Resolve-Path $Root
     $drive = ($resolved.Path.Substring(0, 1)).ToUpper()
-    if ($Scheme -eq 'Auto') { $Scheme = if ($drive -eq 'C') { 'C' } else { 'D' } }
+    if ($Scheme -eq 'Auto') { $Scheme = if ($drive -eq $script:SystemDriveLetter) { 'C' } else { 'D' } }
     if (-not $OutScanCsv) { $OutScanCsv = Join-Path $env:TEMP ("scan_inventory_$drive.csv") }
 
     Write-Output ("开始扫描: 根={0} 方案={1} 输出={2}" -f $resolved.Path, $Scheme, $OutScanCsv)
@@ -377,14 +658,15 @@ if ($Root) {
     $writer = [System.IO.StreamWriter]::new($OutScanCsv, $false, [System.Text.UTF8Encoding]::new($true))
     $writer.WriteLine('FullPath,Extension,SizeMB,LastWriteTime,Category,Cleanable,Reason')
 
-    $counter = @{ Count = 0 }
+    $counter = @{ Count = 0; Errors = 0; DepthSkipped = 0 }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Scan-Dir $resolved.Path $ExcludeRoots $writer $Scheme $ProtectedRoots $WorkRoot $RecentDays $counter
+    Scan-Dir $resolved.Path $ExcludeRoots $writer $Scheme $ProtectedRoots $WorkRoot $RecentDays $counter $MaxDepth
     $sw.Stop()
     $writer.Close()
     Write-Progress -Activity "扫描 $Scheme 方案" -Completed
 
-    Write-Output ("扫描完成: 共 {0} 个文件，耗时 {1:N1}s，已写入 {2}" -f $counter.Count, $sw.Elapsed.TotalSeconds, $OutScanCsv)
+    Write-Output ("扫描完成: 共 {0} 个文件，耗时 {1:N1}s，访问异常 {2} 次，超深跳过 {3} 个，已写入 {4}" -f
+        $counter.Count, $sw.Elapsed.TotalSeconds, $counter.Errors, $counter.DepthSkipped, $OutScanCsv)
     $CsvPaths = @($OutScanCsv) + @($CsvPaths)
     $scanGenerated = $OutScanCsv
 }
@@ -403,6 +685,7 @@ $planConfirm = [System.Collections.ArrayList]::new()
 $planSafe = [System.Collections.ArrayList]::new()
 $planGuarded = [System.Collections.ArrayList]::new()   # 系统核心目录强制降级的待确认项
 $skippedKeep = 0
+$skippedVcs  = 0
 $loadedFiles = @()
 
 foreach ($cp in $CsvPaths) {
@@ -418,7 +701,7 @@ foreach ($cp in $CsvPaths) {
         }
         # 表头校验：缺必需列即跳过并报错
         $hdr = $data.Header
-        $hdrLower = $hdr | ForEach-Object { $_.ToLower() }   # 大小写不敏感匹配表头，避免外部 CSV 列名大小写差异导致静默跳过
+        $hdrLower = $hdr | ForEach-Object { $_.ToLower() }   # 大小写不敏感匹配表头
         $idxFull = [array]::IndexOf($hdrLower, 'fullpath')
         $idxClean = [array]::IndexOf($hdrLower, 'cleanable')
         $idxSize = [array]::IndexOf($hdrLower, 'sizemb')
@@ -429,7 +712,6 @@ foreach ($cp in $CsvPaths) {
             continue
         }
 
-        # 一次遍历：提取 -> 映射 -> 分类 -> 仅非保留项构建规划对象
         foreach ($cols in $data.Records) {
             $fp = if ($idxFull -lt $cols.Count) { $cols[$idxFull].Trim() } else { '' }
             if ([string]::IsNullOrWhiteSpace($fp)) { continue }
@@ -438,13 +720,27 @@ foreach ($cp in $CsvPaths) {
             $intent = Map-Cleanable $cleanable
             if ($intent -eq 'Keep') { $skippedKeep++; continue }
 
+            # 版本控制数据兜底（清单模式）：扫描模式已在 Classify-C/D 中保护，但清单模式
+            # 直接信任外部 CSV 的 Cleanable 标记。若上游清单把 .git/.svn/.hg 标为"自动清理"，
+            # 会造成版本库引用数据（reflog / objects）不可逆丢失。此处作为最后一道防线，
+            # 一律排除出删除计划——既不受 -DeleteConfirmed 影响，也不进"需确认"队列。
+            if (Test-VersionControlled -LowerPath $fp.ToLower()) { $skippedVcs++; continue }
+
             $safeRoot = Test-SafeRootMatch -Path $fp
 
             # 系统核心目录强制降级：Delete -> Confirm
+            # 例外：显式 -AllowSystemJunk 且该项命中"已知垃圾热点"（如 Windows 更新下载缓存）
             $systemGuarded = $false
             if ($intent -eq 'Delete' -and (Test-SystemProtected -Path $fp)) {
-                $intent = 'Confirm'
-                $systemGuarded = $true
+                $allowByJunk = $false
+                if ($AllowSystemJunk) {
+                    $jt = Test-KnownJunkTarget -LowerPath $fp.ToLower()
+                    if ($jt) { $allowByJunk = $true }
+                }
+                if (-not $allowByJunk) {
+                    $intent = 'Confirm'
+                    $systemGuarded = $true
+                }
             }
 
             $sizeVal   = if ($idxSize -lt $cols.Count) { $cols[$idxSize] } else { $null }
@@ -488,6 +784,7 @@ function Get-ParentAggregation {
     $agg = @{}
     foreach ($it in $Items) {
         $p = $it.Parent
+        if (-not $p) { $p = '(根目录)' }
         if (-not $agg.ContainsKey($p)) { $agg[$p] = @{ Count = 0; Size = 0.0; Cats = @{} } }
         $a = $agg[$p]
         $a.Count++
@@ -501,9 +798,11 @@ function Get-ParentAggregation {
         foreach ($ck in $a.Cats.Keys) { if ($a.Cats[$ck] -gt $best) { $best = $a.Cats[$ck]; $topCat = $ck } }
         [PSCustomObject]@{ Parent = $k; Count = $a.Count; Size = $a.Size; TopCat = $topCat }
     }
-    $rows = $rows | Sort-Object Count -Descending
-    if ($TopN -gt 0 -and $rows.Count -gt $TopN) { $rows = $rows | Select-Object -First $TopN }
-    return $rows
+    if ($null -ne $rows) {
+        $rows = @($rows | Sort-Object Count -Descending)
+        if ($TopN -gt 0 -and $rows.Count -gt $TopN) { $rows = @($rows | Select-Object -First $TopN) }
+    }
+    return @($rows)
 }
 
 # ===================== 生成 Markdown 报告 =====================
@@ -525,24 +824,26 @@ function New-MarkdownReport {
     if ($ScanGenerated) { [void]$sb.AppendLine(('- （上述含脚本现场扫描生成的清单：' + $ScanGenerated + '）')) }
     [void]$sb.AppendLine()
 
-    [void]$sb.AppendLine('## 二、安全根目录（删前需二次确认，硬编码兜底）')
+    [void]$sb.AppendLine('## 二、安全根目录（删前需二次确认）')
     [void]$sb.AppendLine()
-    [void]$sb.AppendLine('凡拟删除项落于以下目录，一律按目录批量二次确认，绝不自动删除（含硬编码兜底根，不可被参数移除）：')
+    [void]$sb.AppendLine('凡拟删除项落于以下目录，一律按目录批量二次确认，绝不自动删除。')
+    [void]$sb.AppendLine('来源：环境变量 CLEANUP_SAFE_ROOTS > -SafeRoots 参数 > 配置文件 cleanup_config.json > 运行时自动探测的用户个人目录（不可被参数移除）。')
     [void]$sb.AppendLine()
     foreach ($r in $SafeRoots) { [void]$sb.AppendLine(('- ' + $r)) }
     [void]$sb.AppendLine()
 
     [void]$sb.AppendLine('## 三、系统核心保护目录（命中即强制降为待确认）')
     [void]$sb.AppendLine()
-    [void]$sb.AppendLine('凡拟删除项落于以下系统目录，一律强制降为"待确认"，绝不自动删除，保证 Win11 系统与已装程序零破坏：')
+    [void]$sb.AppendLine('凡拟删除项落于以下系统目录，一律强制降为"待确认"，绝不自动删除，保证 Windows 系统与已装程序零破坏。')
+    [void]$sb.AppendLine('（路径由系统环境变量 / Shell 特殊文件夹 / 注册表自动探测，非硬编码）')
     [void]$sb.AppendLine()
     foreach ($r in $SystemProtectedRoots) { [void]$sb.AppendLine(('- ' + $r)) }
     [void]$sb.AppendLine()
 
-    $delSize = ($PlanDelete | Measure-Object -Property SizeMB -Sum).Sum
-    $conSize = ($PlanConfirm | Measure-Object -Property SizeMB -Sum).Sum
-    $safeSize = ($PlanSafe | Measure-Object -Property SizeMB -Sum).Sum
-    $guardSize = ($PlanGuarded | Measure-Object -Property SizeMB -Sum).Sum
+    $delSize = Get-SafeSum -Items $PlanDelete -Property 'SizeMB'
+    $conSize = Get-SafeSum -Items $PlanConfirm -Property 'SizeMB'
+    $safeSize = Get-SafeSum -Items $PlanSafe -Property 'SizeMB'
+    $guardSize = Get-SafeSum -Items $PlanGuarded -Property 'SizeMB'
 
     [void]$sb.AppendLine('## 四、处置统计')
     [void]$sb.AppendLine()
@@ -625,7 +926,7 @@ function New-MarkdownReport {
             }
             else {
                 [void]$sb.AppendLine('| 所在子目录 | 文件数 | 总体积(MB) |')
-                [void]$sb.AppendLine('| --- | --- | --- |')
+                [void]$sb.AppendLine('| --- | --- | --- | --- |')
                 $grp = Get-ParentAggregation -Items $br.Group
                 foreach ($g in $grp) {
                     [void]$sb.AppendLine(('| {0} | {1} | {2:N2} |' -f ($g.Parent -replace '\|', '/'), $g.Count, $g.Size))
@@ -638,7 +939,7 @@ function New-MarkdownReport {
     # 第四节 系统核心降级
     [void]$sb.AppendLine('## 八、系统核心目录强制待确认清单')
     [void]$sb.AppendLine()
-    [void]$sb.AppendLine('> 以下拟删除项命中系统核心保护目录（C:\Windows / Program Files / ProgramData 等），已被强制降为"待确认"，绝不自动删除。如需清理，需显式 `-DeleteConfirmed` 并在交互中确认。')
+    [void]$sb.AppendLine('> 以下拟删除项命中系统核心保护目录，已被强制降为"待确认"，绝不自动删除。如需清理，需显式 `-DeleteConfirmed`（以及可选的 `-AllowSystemJunk`）并在交互中确认。')
     [void]$sb.AppendLine()
     if ($PlanGuarded.Count -eq 0) {
         [void]$sb.AppendLine('_无（系统核心目录下当前无拟删除项，已验证未误伤）_')
@@ -653,7 +954,7 @@ function New-MarkdownReport {
         }
         else {
             [void]$sb.AppendLine('| 所在目录 | 文件数 | 总体积(MB) |')
-            [void]$sb.AppendLine('| --- | --- | --- | ---')
+            [void]$sb.AppendLine('| --- | --- | --- | --- |')
             $grp = Get-ParentAggregation -Items $PlanGuarded -TopN 500
             foreach ($g in $grp) {
                 [void]$sb.AppendLine(('| {0} | {1} | {2:N2} |' -f ($g.Parent -replace '\|', '/'), $g.Count, $g.Size))
@@ -666,15 +967,16 @@ function New-MarkdownReport {
     [void]$sb.AppendLine()
     [void]$sb.AppendLine('- 本脚本 DryRun 模式**不删除任何文件**，仅生成规划报告。')
     [void]$sb.AppendLine('- 所有删除决策来源于清单（现场扫描或既有 CSV）的 `Cleanable` 字段，经"标签→处置映射层"统一处理（兼容 scan2 描述性标签与 scan3 三值标签），未硬编码任何具体文件。')
-    [void]$sb.AppendLine('- 安全根目录（D:\ZW工作、D:\Tools、D:\Documents 等，含硬编码兜底）下的任何拟删除项均被拦截为二次确认，避免误删用户工作/工具/文档。')
-    [void]$sb.AppendLine('- 系统核心目录（C:\Windows、C:\Program Files、C:\ProgramData 等）下的拟删除项被强制降为待确认，保证 Win11 系统与已装程序零破坏。')
+    [void]$sb.AppendLine('- 安全根目录下的任何拟删除项均被拦截为二次确认，避免误删用户工作/工具/文档。')
+    [void]$sb.AppendLine('- 系统核心目录下的拟删除项被强制降为待确认，保证 Windows 系统与已装程序零破坏。')
+    [void]$sb.AppendLine('- 版本控制目录（`.git` / `.svn` / `.hg`）下的内容一律保留，防止误删 Git reflog 等引用数据。')
     [void]$sb.AppendLine('- 删除操作使用底层 .NET API（`[System.IO.File]::Delete` / `[System.IO.Directory]::Delete($path, $true)`）以绝对字面路径删除，对含 `[]{}` `$` 等特殊字符的路径安全；目录型路径递归删除，且按目录二次确认；Execute 模式可用 `-WhatIf` 模拟试运行。')
 
     return $sb.ToString()
 }
 
 $md = New-MarkdownReport -PlanDelete $planDelete -PlanConfirm $planConfirm -PlanSafe $planSafe -PlanGuarded $planGuarded -LoadedFiles $loadedFiles -SafeRoots $SafeRoots -SystemProtectedRoots $SystemProtectedRoots -Mode $Mode -WhatIf $WhatIf -ScanGenerated $scanGenerated
-[System.IO.File]::WriteAllText($OutMd, $md, [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText($OutMd, $md, [System.Text.UTF8Encoding]::new($true))
 
 # 完整清单 CSV（逐文件，绝对路径不丢失，供一致性校验）
 $csvLines = [System.Collections.Generic.List[string]]::new()
@@ -683,20 +985,23 @@ foreach ($it in $planDelete) { [void]$csvLines.Add((Format-CsvLine @($it.Path, (
 foreach ($it in $planConfirm) { [void]$csvLines.Add((Format-CsvLine @($it.Path, ('{0:N4}' -f $it.SizeMB), $it.Category, $it.Reason, 'Confirm', '', 'False', '待确认'))) }
 foreach ($it in $planSafe) { [void]$csvLines.Add((Format-CsvLine @($it.Path, ('{0:N4}' -f $it.SizeMB), $it.Category, $it.Reason, 'Safe', $it.SafeRoot, 'False', '安全根二次确认'))) }
 foreach ($it in $planGuarded) { [void]$csvLines.Add((Format-CsvLine @($it.Path, ('{0:N4}' -f $it.SizeMB), $it.Category, $it.Reason, 'Guarded', '', 'True', '系统核心降级待确认'))) }
-[System.IO.File]::WriteAllText($OutCsv, ($csvLines -join "`r`n"), [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText($OutCsv, ($csvLines -join "`r`n"), [System.Text.UTF8Encoding]::new($true))
 
 Write-Output ('已生成 Markdown 报告: {0}' -f $OutMd)
 Write-Output ('已生成完整清单 CSV: {0}' -f $OutCsv)
 
-$delSize = ($planDelete | Measure-Object -Property SizeMB -Sum).Sum
-$conSize = ($planConfirm | Measure-Object -Property SizeMB -Sum).Sum
-$safeSize = ($planSafe | Measure-Object -Property SizeMB -Sum).Sum
-$guardSize = ($planGuarded | Measure-Object -Property SizeMB -Sum).Sum
+$delSize = Get-SafeSum -Items $planDelete -Property 'SizeMB'
+$conSize = Get-SafeSum -Items $planConfirm -Property 'SizeMB'
+$safeSize = Get-SafeSum -Items $planSafe -Property 'SizeMB'
+$guardSize = Get-SafeSum -Items $planGuarded -Property 'SizeMB'
 Write-Output ('确定拟删除: {0} 个 / {1:N2} MB' -f $planDelete.Count, $delSize)
 Write-Output ('待确认: {0} 个 / {1:N2} MB' -f $planConfirm.Count, $conSize)
 Write-Output ('安全根二次确认: {0} 个 / {1:N2} MB' -f $planSafe.Count, $safeSize)
 Write-Output ('系统核心降级待确认: {0} 个 / {1:N2} MB' -f $planGuarded.Count, $guardSize)
 Write-Output ('已跳过(保留/否/受保护/未知): {0} 个' -f $skippedKeep)
+if ($skippedVcs -gt 0) {
+    Write-Output ('版本控制数据保护: {0} 个（.git/.svn/.hg，任何模式下均不删除）' -f $skippedVcs)
+}
 
 # ===================== 执行删除（仅 Execute 模式） =====================
 function Remove-OneItem {
@@ -706,7 +1011,7 @@ function Remove-OneItem {
     try { $isDir = (Get-Item -LiteralPath $It.Path -ErrorAction Stop) -is [System.IO.DirectoryInfo] }
     catch { Write-Warning ('无法访问: {0} - {1}' -f $It.Path, $_.Exception.Message); return 'fail' }
     try {
-        # 使用底层 .NET API 删除，绕开可能被安全软件 hook 的 Remove-Item cmdlet（本机 safe-delete 会拦截/重定义 Remove-Item）。
+        # 使用底层 .NET API 删除，绕开可能被安全软件 hook 的 Remove-Item cmdlet。
         # 路径为绝对 LiteralPath，不涉及 PowerShell 通配符，对含 [] {} $ 等特殊字符的路径安全。
         if ($isDir) { [System.IO.Directory]::Delete($It.Path, $true) }   # 递归删除目录
         else { [System.IO.File]::Delete($It.Path) }
@@ -718,33 +1023,45 @@ function Remove-OneItem {
     }
 }
 
-$dirConfirmCache = @{}
+# 目录确认缓存（通过参数传递，避免函数隐式依赖外层变量）
+$script:DirConfirmCache = @{}
+
 function Confirm-Dir {
-    param([string]$Dir)
-    if ($dirConfirmCache.ContainsKey($Dir)) { return $dirConfirmCache[$Dir] }
-    if ($script:WhatIf) { $dirConfirmCache[$Dir] = $true; return $true }   # WhatIf 下不弹确认，直接视为将删（仅报告）
+    param([string]$Dir, [bool]$WhatIf)
+    if ($script:DirConfirmCache.ContainsKey($Dir)) { return $script:DirConfirmCache[$Dir] }
+    if ($WhatIf) { $script:DirConfirmCache[$Dir] = $true; return $true }   # WhatIf 下不弹确认，直接视为将删（仅报告）
     $ans = Read-Host ('是否递归删除目录 [{0}] ? (y/N)' -f $Dir)
     $ok = ($ans -match '^[yY]')
-    $dirConfirmCache[$Dir] = $ok
+    $script:DirConfirmCache[$Dir] = $ok
     return $ok
 }
 
 function Invoke-DeleteBatch {
     param($Items, [bool]$RequireDirConfirm, [bool]$WhatIf, [string]$Label)
+
     $ok = 0; $fail = 0; $skip = 0
+    # 返回结构化统计对象，而不是「统计数字 + 混杂的日志字符串」。
+    # 原因：本函数返回值会被赋值使用（$st = Invoke-DeleteBatch ...），若函数体内直接
+    # Write-Output 打日志，日志会串入返回值，使调用方的 $st.Fail 变为数组、判断失真。
+    # 日志改由 Messages 收集，交调用方统一输出——输出文案保持不变，返回值保持干净。
+    $messages = [System.Collections.Generic.List[string]]::new()
+
     foreach ($it in $Items) {
         if (-not (Test-Path -LiteralPath $it.Path)) { $skip++; continue }
-        $isDir = (Get-Item -LiteralPath $it.Path) -is [System.IO.DirectoryInfo]
+        $isDir = $false
+        # TOCTOU 保护：上一步 Test-Path 与此处 Get-Item 之间文件可能已被删除或变为不可访问
+        try { $isDir = (Get-Item -LiteralPath $it.Path -ErrorAction Stop) -is [System.IO.DirectoryInfo] }
+        catch { Write-Warning ('无法访问，已跳过: {0}' -f $it.Path); $skip++; continue }
+
         if ($isDir -and $RequireDirConfirm) {
-            # 确认对象必须是目录自身（$it.Path，$isDir 已为真）；此前误用父目录作确认/缓存对象，
-            # 导致"确认提示的目录"与"实际删除的目录"不一致。现统一为 $it.Path。
-            if (-not (Confirm-Dir -Dir $it.Path)) {
-                Write-Output ('已跳过目录 [{0}]' -f $it.Path)
+            # 确认对象必须是目录自身（$it.Path，$isDir 已为真）
+            if (-not (Confirm-Dir -Dir $it.Path -WhatIf $WhatIf)) {
+                [void]$messages.Add(('已跳过目录 [{0}]' -f $it.Path))
                 $skip++; continue
             }
         }
         if ($WhatIf) {
-            Write-Output ('WhatIf: 将删除 {0} [{1}]' -f $(if ($isDir) { '目录' } else { '文件' }), $it.Path)
+            [void]$messages.Add(('WhatIf: 将删除 {0} [{1}]' -f $(if ($isDir) { '目录' } else { '文件' }), $it.Path))
             $ok++; continue
         }
         $r = Remove-OneItem -It $it
@@ -754,20 +1071,37 @@ function Invoke-DeleteBatch {
             'missing' { $skip++ }
         }
     }
-    Write-Output ('{0}: 成功 {1}，失败 {2}，跳过 {3}' -f $Label, $ok, $fail, $skip)
+    return [PSCustomObject]@{
+        Label    = $Label
+        Ok       = $ok
+        Fail     = $fail
+        Skip     = $skip
+        Messages = $messages
+    }
 }
 
+function Write-DeleteStat {
+    param($Stat)
+    foreach ($m in $Stat.Messages) { Write-Output $m }
+    Write-Output ('{0}: 成功 {1}，失败 {2}，跳过 {3}' -f $Stat.Label, $Stat.Ok, $Stat.Fail, $Stat.Skip)
+    return [int]$Stat.Fail
+}
+
+$exitCode = 0
 if ($Mode -eq 'Execute') {
     Write-Output '===== 进入执行删除模式 ====='
     if ($WhatIf) { Write-Output '（WhatIf 已启用：仅模拟删除，不实际删除任何文件，不弹出交互确认）' }
 
     # 1. 确定拟删除（非安全根、非系统核心）：目录型按目录确认
-    Invoke-DeleteBatch -Items $planDelete -RequireDirConfirm $true -WhatIf $WhatIf -Label '自动清理删除'
+    $f = Write-DeleteStat -Stat (Invoke-DeleteBatch -Items $planDelete -RequireDirConfirm $true -WhatIf $WhatIf -Label '自动清理删除')
+    if ($f -gt 0) { $exitCode = 2 }
 
     # 2. 需确认项 / 系统核心降级项（仅当显式 -DeleteConfirmed）
     if ($DeleteConfirmed) {
-        Invoke-DeleteBatch -Items $planConfirm -RequireDirConfirm $true -WhatIf $WhatIf -Label '需确认项(已授权)删除'
-        Invoke-DeleteBatch -Items $planGuarded -RequireDirConfirm $true -WhatIf $WhatIf -Label '系统核心降级项(已授权)删除'
+        $f = Write-DeleteStat -Stat (Invoke-DeleteBatch -Items $planConfirm -RequireDirConfirm $true -WhatIf $WhatIf -Label '需确认项(已授权)删除')
+        if ($f -gt 0) { $exitCode = 2 }
+        $f = Write-DeleteStat -Stat (Invoke-DeleteBatch -Items $planGuarded -RequireDirConfirm $true -WhatIf $WhatIf -Label '系统核心降级项(已授权)删除')
+        if ($f -gt 0) { $exitCode = 2 }
     }
     else {
         Write-Output ('非安全根需确认项 {0} 个、系统核心降级项 {1} 个默认跳过（未删除）。' -f $planConfirm.Count, $planGuarded.Count)
@@ -775,9 +1109,12 @@ if ($Mode -eq 'Execute') {
 
     # 3. 安全根项：按目录批量交互确认（始终需显式 y；不静默删）
     if ($planSafe.Count -gt 0) {
-        Invoke-DeleteBatch -Items $planSafe -RequireDirConfirm $true -WhatIf $WhatIf -Label '安全根目录删除'
+        $f = Write-DeleteStat -Stat (Invoke-DeleteBatch -Items $planSafe -RequireDirConfirm $true -WhatIf $WhatIf -Label '安全根目录删除')
+        if ($f -gt 0) { $exitCode = 2 }
     }
 }
 else {
     Write-Output '===== DryRun 模式：未删除任何文件 ====='
 }
+
+exit $exitCode

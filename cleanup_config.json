@@ -1,0 +1,173 @@
+{
+  "_说明": "cleanup_cd.ps1 的外置配置。脚本本身不含任何本机专属硬编码，所有环境特定目录与规则均在此配置。可被同名环境变量覆盖（CLEANUP_SAFE_ROOTS，分号分隔，优先级最高）。",
+  "_字段": {
+    "safeRoots": "安全根目录：其下任何拟删除项一律提升为「按目录二次确认」，永不自动删除。",
+    "workRoots": "工作区根目录：命中受保护扩展名的文件强制保留。",
+    "protectedRoots": "受保护片段（子串匹配，大小写不敏感）：命中即标记「受保护」，永不删除。",
+    "extraExcludeRoots": "扫描时额外跳过的目录（叠加在系统核心目录之上）。",
+    "recentDays": "近期缓存阈值（天）：超过则不再以「近期缓存」为由保留。",
+    "classification": "分类规则：临时/日志/缓存/保留 的扩展名与目录片段。",
+    "knownJunkTargets": "已知垃圾热点：微软/业界公认可安全清理的位置，用于消除「明明是标准垃圾却判为未知」的漏检。每条含 source(权威来源) 与 serviceStop(删除前需停的服务/进程，空表示无需)。",
+    "versionControlDirs": "版本控制数据目录（如 .git）：一律保留，禁止以任何理由删除。"
+  },
+
+  "safeRoots": [
+    "D:\\ZW工作",
+    "D:\\Tools",
+    "D:\\codebase-memory-mcp",
+    "D:\\Backup",
+    "D:\\Documents"
+  ],
+
+  "workRoots": [
+    "D:\\ZW工作"
+  ],
+
+  "protectedRoots": [
+    ".workbuddy",
+    ".mimocode",
+    "$Recycle.Bin.Safe"
+  ],
+
+  "extraExcludeRoots": [],
+
+  "recentDays": 180,
+
+  "classification": {
+    "tempExtensions": [ ".tmp", ".temp", ".bak", ".old", ".dmp", ".etl", ".chk", ".gid", ".fts", ".nch" ],
+    "logExtensions": [ ".log", ".log1", ".log2", ".log.bak" ],
+    "cacheDirFragments": [ "\\cache\\", "\\caches\\", "\\temp\\", "\\tmp\\", "\\logs\\", "\\log\\", "\\crashdumps\\", "\\dumps\\" ],
+    "keepExtensions": [ ".exe", ".dll", ".sys", ".msi", ".ocx", ".drv", ".efi" ],
+    "workKeepExtensions": [ ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf", ".txt", ".md", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".mp3", ".mp4", ".avi", ".zip", ".rar", ".7z", ".html", ".htm" ],
+    "versionControlDirs": [ "\\.git\\", "\\.svn\\", "\\.hg\\" ]
+  },
+
+  "knownJunkTargets": [
+    {
+      "name": "Windows 更新下载缓存",
+      "fragment": "\\softwaredistribution\\download\\",
+      "category": "Windows 更新缓存",
+      "cleanable": "自动清理",
+      "reason": "Windows Update 已下载的安装包，装完即可删；删除不影响系统，仅会触发重新下载",
+      "source": "微软官方支持 KB2795190 (support.microsoft.com/kb/2795190)",
+      "serviceStop": "删除前需停止 Windows Update(wuauserv)与 BITS(bits)服务：net stop wuauserv / net stop bits；删完 net start 重启"
+    },
+    {
+      "name": "传递优化缓存",
+      "fragment": "\\deliveryoptimization\\cache\\",
+      "category": "传递优化缓存",
+      "cleanable": "自动清理",
+      "reason": "Windows 传递优化(P2P 分发)缓存，真实路径在 ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\DeliveryOptimization\\Cache；可安全删除，常释放 5~20GB",
+      "source": "微软官方 Q&A (learn.microsoft.com/en-us/answers/questions/5855012)",
+      "serviceStop": "删除前需停止 Delivery Optimization 服务(dosvc)；可选同时停 wuauserv/bits"
+    },
+    {
+      "name": "Windows 缩略图缓存",
+      "fragment": "\\explorer\\thumbcache_",
+      "category": "缩略图缓存",
+      "cleanable": "自动清理",
+      "reason": "资源管理器缩略图数据库，删除后系统自动重建",
+      "source": "Disk Cleanup 官方机制 (cleanmgr / 缩略图)",
+      "serviceStop": "文件被 explorer.exe 占用，需先结束 Windows 资源管理器进程再删，或直接使用 cleanmgr 清理"
+    },
+    {
+      "name": "Windows 图标缓存",
+      "fragment": "\\explorer\\iconcache_",
+      "category": "图标缓存",
+      "cleanable": "自动清理",
+      "reason": "资源管理器图标数据库，删除后系统自动重建",
+      "source": "Disk Cleanup 官方机制",
+      "serviceStop": "同缩略图缓存，需先结束 explorer.exe"
+    },
+    {
+      "name": "CBS 组件日志",
+      "fragment": "\\logs\\cbs\\",
+      "category": "系统组件日志",
+      "cleanable": "自动清理",
+      "reason": "Windows 组件基于服务的日志(CBS.log)，可安全删除，Windows 会重新生成",
+      "source": "idctop 服务器清理指南 / 微软组件存储日志",
+      "serviceStop": ""
+    },
+    {
+      "name": "Windows 错误报告队列",
+      "fragment": "\\microsoft\\windows\\wer\\",
+      "category": "错误报告",
+      "cleanable": "自动清理",
+      "reason": "Windows 错误报告(WER)队列与报告存档，可安全删除，通常释放 1~10GB",
+      "source": "geekchamp 系统清理指南 / dev.to",
+      "serviceStop": ""
+    },
+    {
+      "name": "Windows 错误报告临时",
+      "fragment": "\\windows\\wer\\",
+      "category": "错误报告",
+      "cleanable": "自动清理",
+      "reason": "Windows 错误报告临时目录，可安全删除",
+      "source": "dev.to 清理指南",
+      "serviceStop": ""
+    },
+    {
+      "name": "字体缓存",
+      "fragment": "\\local\\fontcache\\",
+      "category": "字体缓存",
+      "cleanable": "自动清理",
+      "reason": "Windows 字体缓存数据库，重启后自动重建",
+      "source": "Windows 字体缓存机制",
+      "serviceStop": ""
+    },
+    {
+      "name": "崩溃转储",
+      "fragment": "\\crashdumps\\",
+      "category": "崩溃转储",
+      "cleanable": "自动清理",
+      "reason": "应用崩溃转储(.dmp)，排查完成即可删",
+      "source": "TheWindowsClub / myrecover",
+      "serviceStop": ""
+    },
+    {
+      "name": "预读取缓存",
+      "fragment": "\\prefetch\\",
+      "category": "预读取缓存",
+      "cleanable": "自动清理",
+      "reason": "程序启动加速预读信息，SSD 上收益极小，Windows 自动重建；可按月清空",
+      "source": "dev.to / idctop 服务器清理指南",
+      "serviceStop": ""
+    },
+    {
+      "name": "系统全量崩溃转储",
+      "fragment": "\\memory.dmp",
+      "category": "系统崩溃转储",
+      "cleanable": "需确认",
+      "reason": "C:\\Windows\\Memory.dmp 单次蓝屏全量转储，体积可达数百 MB~GB；正在排查的蓝屏不要删",
+      "source": "TheWindowsClub / wisecleaner",
+      "serviceStop": ""
+    },
+    {
+      "name": "系统小转储目录",
+      "fragment": "\\minidump\\",
+      "category": "系统崩溃转储",
+      "cleanable": "需确认",
+      "reason": "C:\\Windows\\Minidump 下多个小转储，可安全删除，但只删文件不删目录本身",
+      "source": "geekchamp / wisecleaner",
+      "serviceStop": ""
+    },
+    {
+      "name": "Windows 诊断 ETL 日志",
+      "fragment": "\\etllogs\\",
+      "category": "诊断日志",
+      "cleanable": "自动清理",
+      "reason": "ProgramData\\Microsoft\\Diagnosis\\ETLLogs 下事件跟踪日志(.etl)，可安全删除，Windows 会重建活动项",
+      "source": "woshub / file-extension.info",
+      "serviceStop": "不要删除正在被写入的跟踪会话文件(.etl)"
+    },
+    {
+      "name": "Windows Update 日志",
+      "fragment": "\\logs\\windowsupdate\\",
+      "category": "更新日志",
+      "cleanable": "自动清理",
+      "reason": "Windows Update 日志目录，纯日志无功能数据，可安全删除",
+      "source": "dev.to 清理指南",
+      "serviceStop": ""
+    }
+  ]
+}
