@@ -27,7 +27,7 @@
 
 把 FluentCleaner 内置的真实 Winapp2 规则库整套纳入本项目，展开为本机可直接消费的清理候选清单；`cleanup_cd.ps1` 零改动，其双层硬保护照常生效。
 
-- `winapp2_full.ini`：真实规则库（权威源，3721 条），可审计、可更新。
+- `winapp2_full.ini`：真实规则库（权威源，3726 条：3721 基线 + 5 条 BleachBit 借鉴补入），可审计、可更新。
 - `winapp2_full_expanded.csv`：全量候选清单（派生，由扩展器从 ini 生成，`cleanup_cd` 可直接吃）。
 - `winapp2_expand.ps1`：扩展器，把 ini 展开为与 `cleanup_cd` 同构的 CSV。
 - `winapp2_sample.ini`：5 条专门构造的硬保护探针规则。

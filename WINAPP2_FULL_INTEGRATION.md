@@ -9,7 +9,7 @@
 
 | 资产 | 文件 | 体量 | 说明 |
 |------|------|------|------|
-| 真实规则库（权威源） | `winapp2_full.ini` | 1,392,621 B（≈1.33 MB） | 3721 条规则，可审计、可更新 |
+| 真实规则库（权威源） | `winapp2_full.ini` | 1,394,342 B（≈1.33 MB） | 3726 条规则（3721 基线 + 5 条 BleachBit 借鉴补入），可审计、可更新 |
 | 全量候选清单（派生） | `winapp2_full_expanded.csv` | 6.73 MB / 32937 行 | 由扩展器从 ini 生成，`cleanup_cd` 可直接吃 |
 | 扩展器（工具） | `winapp2_expand.ps1` | — | 把 ini 展开为同构 CSV，**零改动** `cleanup_cd` |
 | 验证样例 | `winapp2_sample.ini` | — | 5 条专门构造的硬保护探针规则 |
@@ -20,11 +20,11 @@
 
 ## 二、本机实测关键数据
 
-- 规则总数：**3721**
-- 已装应用（通过 `DetectFile`/`Detect` 门控）：**167**
-- 跳过 RegKey（默认未启用 `-IncludeReg`）：**311**
-- 展开处置行：**32936**
-- 候选清理总量：**1,534.58 MB（约 1.5 GB）**
+- 规则总数：**3726**（3721 基线 + 5 条 BleachBit 借鉴补入）
+- 已装应用（DetectFile 门控，依赖本机状态）：**160**（实时探测值，随已装软件浮动）
+- 跳过 RegKey（默认未启用 `-IncludeReg`）：**283**（实时探测值，随环境浮动）
+- 展开处置行：**155159**（实时探测值，随本机已装软件浮动）
+- 候选清理总量：**随本机已装软件与文件体积浮动，以 DryRun 报告为准**（保守策略下零自动删除）
 - 保守策略下确定拟删除：**0**（零自动删除，全部进入待确认）
 - DryRun 全程文件删除：**0**
 
@@ -82,3 +82,22 @@
 - 默认跳过 RegKey（注册表清理）；启用 `-IncludeReg` 仅作备注，`cleanup_cd` 不删注册表。
 - 真实库含 `DetectFile` 的「路径|子串」高级语法，扩展器已兼容兜底。
 - 全量展开约 9 秒；超大库可用 `-MaxEntries` 分批。
+
+---
+
+## 八、变体裁决与 GitHub 借鉴（2026-09-01）
+
+### 8.1 Winapp2 变体裁决：保持 Non-CCleaner，不升级完整版
+
+- **对比对象**：本地 `winapp2_full.ini`（Non-CCleaner 变体，3721 条，v260730） vs BleachBit `Winapp2-BleachBit.ini`（上游完整版，4066 条，v260730）。
+- **差集**：本地缺失 367 条（BleachBit 独有）。分类核实：浏览器同步/缓存类 122 条、厂商专有工具（三星/Intel/HP/Lenovo/ASUS 等）约 214 条、设计/办公 5 条、游戏 2 条、缓存日志 24 条。**缺失项中无任何"本地漏掉的 Windows 系统级垃圾"**（仅 2 条含 `Windows` 字样，均为厂商/365 应用，非系统核心）。
+- **裁决：保持 Non-CCleaner 变体，不升级完整版**。理由：第一安全原则"宁可少删不可误删"——367 条差集绝大多数是浏览器隐私数据与厂商专有缓存，自动清理既无收益又有误删/隐私风险，与本项目双层硬保护定位冲突；本地变体已覆盖全部 Windows 系统级清理。
+- **版本状态**：本地与上游同为 v260730，版本未过时，无需因版本滞后升级。
+
+### 8.2 GitHub 借鉴（BleachBit/winapp2.ini）：经核验补入 5 条
+
+- **来源**：`bleachbit/winapp2.ini` 的 `Winapp2-BleachBit.ini`（v260730，blob sha `ea6e076c`）。
+- **筛选原则**：非浏览器 / 非厂商专有 / 带 `DetectFile` 门控 / 路径限定 `AppData` 或 `ProgramData`；保守默认下仅进"需确认"队列，不自动删除。
+- **已补入**（见文件尾部 `; BleachBit/winapp2.ini 借鉴补入` 注释块，2026-09-01）：`CefSharp`（嵌入式浏览器框架缓存）、`ImageGlass`（看图器缩略图缓存）、`Composer Dependency Manager for PHP`（Composer 旧包/缓存）、`Adobe Crash Reporter`（Adobe 崩溃日志）、`BreeZip`（商店版压缩工具临时/日志）。
+- **已排除**：122 条浏览器同步类（Chrome/Edge/Firefox/Brave 等隐私数据）、全部厂商专有条目，以及 `Grammarly`/`Microsoft Clipchamp` 等极冗长的 WebView 缓存清理段（安全但价值低、徒增审阅噪声）。
+- **验证**：补入后解析 3726 条（原 3721 + 5），扩展器再生候选清单 155159 行，Pester 10/10 全绿，无回归。
