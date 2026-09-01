@@ -5,6 +5,30 @@
 
 ---
 
+## [v0.5.1] - 2026-09-01
+
+### 修复（Fix）
+- **`Write-DeleteStat` 函数污染**：该函数返回值被 `$f = Write-DeleteStat ...` 赋值使用，
+  原实现用 `Write-Output` 打日志，日志串入成功输出流使返回值变为数组，导致 `if ($f -gt 0)`
+  判定失真——零失败也会被误判为 exit 2。修复：日志改走 `Write-Host`（信息流，不进成功输出流），
+  返回值保持干净 `[int]$Stat.Fail`。
+- **`Get-ProgramFilesPaths` 环境变量名修正**：`'ProgramW6432Dir'` 并非环境变量名（正确为
+  `'ProgramW6432'`），在 32 位宿主(WOW64)下会取空、丢掉真实的 64 位 Program Files，形成保护面缺口。
+  注册表回退处的值名 `ProgramW6432Dir` 本就合法，未被误改。
+- **`Parse-Winapp2` 换行分割健壮性**：`-split "`r|`n"` 对 CRLF 会分裂出空行，改为 `-split '\r?\n'`，
+  CRLF / LF / 混合换行三种输入产出完全一致。
+- **`Resolve-Recursive` 自动变量遮蔽**：局部变量 `$matches` 遮蔽 PowerShell 自动变量（`-match`
+  的捕获组容器），一旦同作用域引入 `-match` 判断就会静默读到错值；改名为 `$hits`。
+
+### 变更（Changelog）
+- **移除 `tests/` 测试套件**：按用户决策，`tests/cleanup_candd.tests.ps1`、`tests/run_pester.ps1`、
+  `tests/tools/scan_probe.ps1` 及 `tests/` 目录从仓库移除。v0.5.1 起本仓库不再自带 Pester 回归套件。
+- **清理工区**：删除 `winapp2_full_expanded.csv`（43MB 展开过程产物，已 `.gitignore`、无任何引用）
+  与 `D:\System\UserTemp\zw_pester_*`（Pester 测试临时/脚手架产物，OS 临时目录）。
+
+### 注意
+- 本版本起无内置回归测试，发版正确性依赖人工复核与外部审计（`powershell-audit-regression` 技能）。
+
 ## [v0.5.0] - 2026-09-01
 
 ### 新增（Feature）

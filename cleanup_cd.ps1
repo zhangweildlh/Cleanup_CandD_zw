@@ -171,7 +171,7 @@ function Get-SystemDriveLetter {
 
 function Get-ProgramFilesPaths {
     $out = [System.Collections.Generic.List[string]]::new()
-    foreach ($name in @('ProgramFiles', 'ProgramW6432Dir')) {
+    foreach ($name in @('ProgramFiles', 'ProgramW6432')) {
         $v = [Environment]::GetEnvironmentVariable($name)
         if ($v) { [void]$out.Add($v) }
     }
@@ -1188,8 +1188,11 @@ function Invoke-DeleteBatch {
 
 function Write-DeleteStat {
     param($Stat)
-    foreach ($m in $Stat.Messages) { Write-Output $m }
-    Write-Output ('{0}: 成功 {1}，失败 {2}，跳过 {3}' -f $Stat.Label, $Stat.Ok, $Stat.Fail, $Stat.Skip)
+    # 日志走 Write-Host（信息流），不进成功输出流——本函数返回值被赋值使用
+    # （$f = Write-DeleteStat ...），若用 Write-Output 会把日志串入返回值，使 $f 变为
+    # 数组、if ($f -gt 0) 判定失真（同类 F-B 函数污染缺陷，必须规避）。
+    foreach ($m in $Stat.Messages) { Write-Host $m }
+    Write-Host ('{0}: 成功 {1}，失败 {2}，跳过 {3}' -f $Stat.Label, $Stat.Ok, $Stat.Fail, $Stat.Skip)
     return [int]$Stat.Fail
 }
 

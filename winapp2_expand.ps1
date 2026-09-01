@@ -126,12 +126,14 @@ function Resolve-Recursive {
     $wildcard = $parts[$wcIdx]
     $remaining = if ($wcIdx + 1 -lt $parts.Length) { $parts[($wcIdx + 1)..($parts.Length - 1)] } else { @() }
     try {
-        $matches = if ($remaining.Length -eq 0) {
+        # 变量名不用 $matches：那是 PowerShell 自动变量（-match 的捕获组容器），
+        # 在同一作用域内赋值会遮蔽它，一旦本函数将来引入 -match 判断就会静默读到错值。
+        $hits = if ($remaining.Length -eq 0) {
             [System.IO.Directory]::GetFileSystemEntries($basePath, $wildcard)
         } else {
             [System.IO.Directory]::GetDirectories($basePath, $wildcard)
         }
-        foreach ($mt in $matches) {
+        foreach ($mt in $hits) {
             if ($remaining.Length -eq 0) { [void]$results.Add($mt) }
             else { Resolve-Recursive (Join-Path $mt ([string]::Join('\', $remaining))) $results }
         }
@@ -332,7 +334,7 @@ function Parse-Winapp2 {
     param($content)
     $entries = [System.Collections.Generic.List[PSCustomObject]]::new()
     $cur = $null
-    $lines = $content -split "`r|`n"
+    $lines = $content -split '\r?\n'
     foreach ($line in $lines) {
         $l = $line.Trim()
         if ($l.Length -eq 0 -or $l[0] -eq ';' -or $l[0] -eq '#') { continue }

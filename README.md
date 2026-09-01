@@ -31,7 +31,7 @@ updated: 2026-09-01
 | 配置说明 | [docs/configuration.md](docs/configuration.md) | `cleanup_config.json` 全部字段、安全根/受保护片段/已知垃圾热点、环境变量 |
 | Winapp2 集成 | [docs/winapp2-integration.md](docs/winapp2-integration.md) | 变体裁决、F-2/F-3 语义、扩展器用法、已借鉴的 5 条 BleachBit 条目 |
 | 上游追踪 | [docs/upstream-tracking.md](docs/upstream-tracking.md) | 三个上游仓库地址、检查命令、借鉴筛选原则、**Agent 自主闭环 SOP** |
-| 测试套件 | [docs/testing.md](docs/testing.md) | Pester 运行方式、45 用例覆盖矩阵、PS 5.1 陷阱 |
+| 测试历史 | [docs/testing.md](docs/testing.md) | 历史 Pester 用例覆盖矩阵与 PS 5.1 陷阱（v0.5.1 起仓库不再自带测试套件，回归验证改由外部审计承担） |
 
 ---
 
@@ -60,9 +60,6 @@ updated: 2026-09-01
 
 # 4) 模拟删除（WhatIf，不实际删、不弹确认）
 .\cleanup_cd.ps1 -CsvPaths .\winapp2_full_expanded.csv -Mode Execute -WhatIf
-
-# 运行测试（PowerShell 5.1 下）
-.\tests\run_pester.ps1 .\tests\cleanup_candd.tests.ps1
 ```
 
 > 完整参数表见 [docs/architecture.md](docs/architecture.md) §四；配置字段见 [docs/configuration.md](docs/configuration.md)。
@@ -85,7 +82,7 @@ updated: 2026-09-01
 1. 环境核验（`gh auth status` + 测试基线须全绿）；
 2. 取上游最近修改日期（`gh api .../commits`）并与本地比对；
 3. 拉取全文 diff，按 6 条筛选原则只借安全候选；
-4. 补入本地库 → 再生 CSV → 跑 Pester 必须 45/45 全绿（硬门槛）；
+4. 补入本地库 → 再生 CSV → 回归验证（v0.5.1 起仓库无内置测试套件，须走外部审计 `powershell-audit-regression` 技能做三层验证：语法/AST静态审计 + 动态行为复现）；
 5. 仅推自有 fork（`origin`），禁强推/删 `main`，提交消息注明上游 sha/日期。
 
 > 决策铁律：保持 Non-CCleaner 变体，不升级完整版；任何需放宽双层硬保护才能并入的改动一律拒绝。
@@ -94,7 +91,7 @@ updated: 2026-09-01
 
 ## 五、仓库状态与基本操作
 
-- 远端：`zhangweildlh/Cleanup_CandD_zw`（public）；默认分支：`main`；最新标签：`v0.5.0`。
+- 远端：`zhangweildlh/Cleanup_CandD_zw`（public）；默认分支：`main`；最新标签：`v0.5.1`。
 - 派生产物 `winapp2_full_expanded.csv` 已被 `.gitignore` 忽略（可由 ini 一键再生）。
 
 ```bash
