@@ -382,6 +382,32 @@ function Test-VersionControlled {
     return $false
 }
 
+# ===================== 自动清理目录判定（v0.2.0 用户决策） =====================
+# temp/tmp/cache 目录，以及"任意父目录名包含 temp/tmp/cache"的目录，其下文件一律判为
+# 自动清理（需清空）。安全根/系统核心保护在规划阶段决策点兜底（双层硬保护），分类函数本身
+# 只负责"打标签"，不绕过决策点保护；且默认 DryRun + 交互确认，不会自动落盘删除。
+# 注意：此规则较激进——如本机工作区父目录 "AI_Work_Temp" 含 "temp" 也会被命中；实际删除
+# 仍受安全根（含自动探测的 Documents/Desktop/Downloads 等）兜底，扫描整盘时建议指定根目录。
+function Test-AutoCleanDir {
+    param([string]$Path)
+    $p = $Path.ToLower()
+    # 标准临时/缓存目录片段（含带点的 .cache/.tmp/.caches 等常见变体）
+    if ($p -match '\\temp\\' -or $p -match '\\tmp\\' -or $p -match '\\cache\\' -or $p -match '\\caches\\' `
+        -or $p -match '\\\.cache\\' -or $p -match '\\\.tmp\\' -or $p -match '\\\.caches\\' -or $p -match '\\_cacache\\tmp') {
+        return $true
+    }
+    # 用户决策：任意父目录名包含 temp/tmp/cache（不区分大小写）→ 其下文件自动清理。
+    $dir = Split-Path -Path $p -Parent
+    while ($dir) {
+        $root = [System.IO.Path]::GetPathRoot($dir)
+        if ($dir -eq $root) { break }
+        $name = (Split-Path -Path $dir -Leaf).ToLower()
+        if ($name -match 'temp|tmp|cache') { return $true }
+        $dir = Split-Path -Path $dir -Parent
+    }
+    return $false
+}
+
 # ===================== 方案 C 分类（Cleanable: 是/否/谨慎） =====================
 function Classify-C {
     param($fi, $Protected)
@@ -405,8 +431,8 @@ function Classify-C {
         return @{Category = '用户配置'; Cleanable = '否'; Reason = '用户注册表配置(保留)' } }
     if (@($script:KeepExtensions) -contains $ext) { return @{Category = '应用文件'; Cleanable = '否'; Reason = '可执行/库文件(保留)' } }
     if (@($script:LogExtensions) -contains $ext) { return @{Category = '日志文件'; Cleanable = '是'; Reason = '日志文件' } }
-    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\\temp\\') -or ($p -match '\\tmp\\') -or ($p -match '\\_cacache\\tmp')) {
-        return @{Category = '临时文件'; Cleanable = '是'; Reason = '临时扩展名/临时目录' } }
+    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\\_cacache\\tmp') -or (Test-AutoCleanDir -Path $fi.FullName)) {
+        return @{Category = '临时文件'; Cleanable = '是'; Reason = '临时扩展名/临时或缓存目录(可清空)' } }
     foreach ($frag in $script:CacheDirFragments) { if ($p.Contains($frag)) { return @{Category = '缓存文件'; Cleanable = '是'; Reason = '缓存目录/浏览器缓存' } } }
     if ($p -match '\\users\\[^\\]+\\appdata\\roaming' -and $ext -in @('.json', '.ini', '.cfg', '.config', '.xml', '.setting')) {
         return @{Category = '应用配置'; Cleanable = '否'; Reason = '应用配置数据(保留)' } }
@@ -444,8 +470,8 @@ function Classify-D {
         }
     }
     if ($fi.Length -eq 0) { return @{Category = '无用文件(空文件)'; Cleanable = '需确认'; Reason = '0字节空文件(可删)' } }
-    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\\tmp\\') -or ($p -match '\\temp\\') -or ($p -match '\.trash-bak') -or ($p -match '\\smoke\\')) {
-        return @{Category = '垃圾文件(临时/过程)'; Cleanable = '自动清理'; Reason = '临时目录/临时过程文件' } }
+    if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\.trash-bak') -or ($p -match '\\smoke\\') -or (Test-AutoCleanDir -Path $fi.FullName)) {
+        return @{Category = '垃圾文件(临时/过程)'; Cleanable = '自动清理'; Reason = '临时/缓存目录或目录名含 temp/tmp/cache(需清空)' } }
     if (@($script:LogExtensions) -contains $ext) { return @{Category = '垃圾文件(日志)'; Cleanable = '自动清理'; Reason = '应用日志文件' } }
     if (@($script:KeepExtensions) -contains $ext) { return @{Category = '应用文件'; Cleanable = '保留'; Reason = '可执行/库文件(保留)' } }
     if ($p -match 'node_modules\\.*\\cache' -or ($p -match '\\cache\\' -and $p -match 'node_modules')) {

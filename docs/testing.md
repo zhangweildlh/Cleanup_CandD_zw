@@ -1,6 +1,6 @@
 ---
 title: 测试套件
-description: Pester 3.4.0 冒烟测试的运行方式、39 用例的覆盖矩阵（全功能/全场景/全边界），以及 PS 5.1 环境约束。
+description: Pester 3.4.0 冒烟测试的运行方式、42 用例的覆盖矩阵（全功能/全场景/全边界），以及 PS 5.1 环境约束。
 related:
   - architecture.md
   - configuration.md
@@ -24,7 +24,7 @@ updated: 2026-09-01
 - 退出码：`0`=全绿；`1`=有失败。
 - 运行器 `tests/run_pester.ps1` 会裁剪非必要环境变量后再 `Import-Module Pester -RequiredVersion 3.4.0`，规避「环境块超过 65535 字节导致 Add-Type 子进程失败」。
 
-## 二、覆盖矩阵（当前 39 用例）
+## 二、覆盖矩阵（当前 42 用例）
 
 ### A) `winapp2_expand.ps1`
 

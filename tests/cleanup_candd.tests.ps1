@@ -651,17 +651,20 @@ $csvHeader
 
 Describe 'cleanup_cd.ps1 — 现场扫描（-Root，Scheme D 分类）' {
 
-    It '扫描临时目录：.tmp/.log->Delete，普通 .txt->保留跳过' {
-        $scanRoot = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Path $scanRoot -Force | Out-Null
-        # 非空 .tmp -> 自动清理(Delete)；非空 .log -> 自动清理(Delete)
-        [System.IO.File]::WriteAllText((Join-Path $scanRoot 'a.tmp'), 'junk')
-        [System.IO.File]::WriteAllText((Join-Path $scanRoot 'b.log'), 'log')
-        # 普通 .txt -> 其他/未知 -> 保留(Keep)
-        [System.IO.File]::WriteAllText((Join-Path $scanRoot 'c.txt'), 'doc')
+    # 隔离扫描根：置于用户主目录（$env:USERPROFILE）下，避免本机工作区父目录
+    # "AI_Work_Temp" 含 "temp" 片段干扰断言；同时脱离 %TEMP% 以规避 CI 环境路径差异。
+    $scanBase = Join-Path $env:USERPROFILE ('zw_pester_scan_' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scanBase -Force | Out-Null
+
+    It '普通目录：.tmp/.log->Delete，普通 .txt->Keep(保留跳过)' {
+        $normal = Join-Path $scanBase ('normal_' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $normal -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $normal 'a.tmp'), 'junk')
+        [System.IO.File]::WriteAllText((Join-Path $normal 'b.log'), 'log')
+        [System.IO.File]::WriteAllText((Join-Path $normal 'c.txt'), 'doc')
         $outMd = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N') + '.md')
         $outCsv = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N') + '_files.csv')
-        $output = & $cleanupScript -Root $scanRoot -Scheme D -Mode DryRun -OutMd $outMd -OutCsv $outCsv
+        $output = & $cleanupScript -Root $normal -Scheme D -Mode DryRun -OutMd $outMd -OutCsv $outCsv
         $code = $LASTEXITCODE
         $output = $output | Out-String
         $code | Should Be 0
@@ -669,10 +672,70 @@ Describe 'cleanup_cd.ps1 — 现场扫描（-Root，Scheme D 分类）' {
         (@($plan | Where-Object { $_.Intent -eq 'Delete' })).Count | Should Be 2
         (@($plan | Where-Object { $_.FullPath -like '*\c.txt' })).Count | Should Be 0
         $output | Should Match 'DryRun 模式：未删除任何文件'
-        Remove-Item $scanRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $normal -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item $outMd -Force -ErrorAction SilentlyContinue
         Remove-Item $outCsv -Force -ErrorAction SilentlyContinue
     }
+
+    It '临时目录(temp)：其下 .tmp/.log/普通.txt 一律 Delete(自动清理，需清空)' {
+        $tempDir = Join-Path $scanBase ('temp_' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $tempDir 'a.tmp'), 'junk')
+        [System.IO.File]::WriteAllText((Join-Path $tempDir 'b.log'), 'log')
+        [System.IO.File]::WriteAllText((Join-Path $tempDir 'c.txt'), 'doc')
+        $outMd = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N') + '.md')
+        $outCsv = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N') + '_files.csv')
+        $output = & $cleanupScript -Root $tempDir -Scheme D -Mode DryRun -OutMd $outMd -OutCsv $outCsv
+        $code = $LASTEXITCODE
+        $output = $output | Out-String
+        $code | Should Be 0
+        $plan = @(Import-Csv $outCsv)
+        # 临时目录需清空：含普通 .txt 在内一律 Delete（用户决策 v0.2.0）
+        (@($plan | Where-Object { $_.Intent -eq 'Delete' })).Count | Should Be 3
+        $output | Should Match 'DryRun 模式：未删除任何文件'
+        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $outMd -Force -ErrorAction SilentlyContinue
+        Remove-Item $outCsv -Force -ErrorAction SilentlyContinue
+    }
+
+    It '缓存目录(cache)：其下文件一律 Delete(自动清理)' {
+        $cacheDir = Join-Path $scanBase ('cache_' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $cacheDir 'x.tmp'), 'junk')
+        [System.IO.File]::WriteAllText((Join-Path $cacheDir 'y.bin'), 'bin')
+        $outMd = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N') + '.md')
+        $outCsv = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N') + '_files.csv')
+        $output = & $cleanupScript -Root $cacheDir -Scheme D -Mode DryRun -OutMd $outMd -OutCsv $outCsv
+        $code = $LASTEXITCODE
+        $output = $output | Out-String
+        $code | Should Be 0
+        $plan = @(Import-Csv $outCsv)
+        (@($plan | Where-Object { $_.Intent -eq 'Delete' })).Count | Should Be 2
+        $output | Should Match 'DryRun 模式：未删除任何文件'
+        Remove-Item $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $outMd -Force -ErrorAction SilentlyContinue
+        Remove-Item $outCsv -Force -ErrorAction SilentlyContinue
+    }
+
+    It '目录名含 temp/tmp/cache：其下文件一律 Delete(自动清理，用户决策 v0.2.0)' {
+        $namedDir = Join-Path $scanBase ('mytempdata_' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $namedDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $namedDir 'z.txt'), 'doc')
+        $outMd = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N') + '.md')
+        $outCsv = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N') + '_files.csv')
+        $output = & $cleanupScript -Root $namedDir -Scheme D -Mode DryRun -OutMd $outMd -OutCsv $outCsv
+        $code = $LASTEXITCODE
+        $output = $output | Out-String
+        $code | Should Be 0
+        $plan = @(Import-Csv $outCsv)
+        (@($plan | Where-Object { $_.Intent -eq 'Delete' })).Count | Should Be 1
+        $output | Should Match 'DryRun 模式：未删除任何文件'
+        Remove-Item $namedDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $outMd -Force -ErrorAction SilentlyContinue
+        Remove-Item $outCsv -Force -ErrorAction SilentlyContinue
+    }
+
+    Remove-Item $scanBase -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Describe 'cleanup_cd.ps1 — 编码鲁棒性与错误边界' {
