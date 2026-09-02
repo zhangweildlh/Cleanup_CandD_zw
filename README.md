@@ -31,7 +31,7 @@ updated: 2026-09-01
 | 配置说明 | [docs/configuration.md](docs/configuration.md) | `cleanup_config.json` 全部字段、安全根/受保护片段/已知垃圾热点、环境变量 |
 | Winapp2 集成 | [docs/winapp2-integration.md](docs/winapp2-integration.md) | 变体裁决、F-2/F-3 语义、扩展器用法、已借鉴的 5 条 BleachBit 条目 |
 | 上游追踪 | [docs/upstream-tracking.md](docs/upstream-tracking.md) | 三个上游仓库地址、检查命令、借鉴筛选原则、**Agent 自主闭环 SOP** |
-| 测试历史 | [docs/testing.md](docs/testing.md) | 历史 Pester 用例覆盖矩阵与 PS 5.1 陷阱（v0.5.1 起仓库不再自带测试套件，回归验证改由外部审计承担） |
+| 测试 | [docs/testing.md](docs/testing.md) | Pester 3.4.0 套件（81 用例）运行方式、A–F/Z 覆盖矩阵、六项 AST 静态审计、PS 5.1 陷阱 |
 
 ---
 
@@ -82,7 +82,7 @@ updated: 2026-09-01
 1. 环境核验（`gh auth status` + 测试基线须全绿）；
 2. 取上游最近修改日期（`gh api .../commits`）并与本地比对；
 3. 拉取全文 diff，按 6 条筛选原则只借安全候选；
-4. 补入本地库 → 再生 CSV → 回归验证（v0.5.1 起仓库无内置测试套件，须走外部审计 `powershell-audit-regression` 技能做三层验证：语法/AST静态审计 + 动态行为复现）；
+4. 补入本地库 → 再生 CSV → 回归验证（跑 `.\tests\run_pester.ps1`，须 81/81 全绿；该套件已内置 `powershell-audit-regression` 技能的六项 AST 静态审计 + 反证复现，详见 [docs/testing.md](docs/testing.md)）；
 5. 仅推自有 fork（`origin`），禁强推/删 `main`，提交消息注明上游 sha/日期。
 
 > 决策铁律：保持 Non-CCleaner 变体，不升级完整版；任何需放宽双层硬保护才能并入的改动一律拒绝。
