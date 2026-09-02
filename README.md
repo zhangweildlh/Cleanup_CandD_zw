@@ -31,7 +31,7 @@ updated: 2026-09-01
 | 配置说明 | [docs/configuration.md](docs/configuration.md) | `cleanup_config.json` 全部字段、安全根/受保护片段/已知垃圾热点、环境变量 |
 | Winapp2 集成 | [docs/winapp2-integration.md](docs/winapp2-integration.md) | 变体裁决、F-2/F-3 语义、扩展器用法、已借鉴的 5 条 BleachBit 条目 |
 | 上游追踪 | [docs/upstream-tracking.md](docs/upstream-tracking.md) | 三个上游仓库地址、检查命令、借鉴筛选原则、**Agent 自主闭环 SOP** |
-| 测试 | [docs/testing.md](docs/testing.md) | Pester 3.4.0 套件（81 用例）运行方式、A–F/Z 覆盖矩阵、六项 AST 静态审计、PS 5.1 陷阱 |
+| 测试 | [docs/testing.md](docs/testing.md) | Pester 3.4.0 套件（81 用例）运行方式、A–F/Z 覆盖矩阵、六项 AST 静态审计、PS 5.1 陷阱、CI 门禁配置 |
 
 ---
 
