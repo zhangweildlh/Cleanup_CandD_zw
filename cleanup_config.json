@@ -12,11 +12,7 @@
   },
 
   "safeRoots": [
-    "D:\\ZW工作",
-    "D:\\Tools",
-    "D:\\codebase-memory-mcp",
-    "D:\\Backup",
-    "D:\\Documents"
+    ".\\"
   ],
 
   "workRoots": [
@@ -26,7 +22,10 @@
   "protectedRoots": [
     ".workbuddy",
     ".mimocode",
-    "$Recycle.Bin.Safe"
+    "$Recycle.Bin.Safe",
+    ".git",
+    ".github",
+    ".vscode"
   ],
 
   "extraExcludeRoots": [],

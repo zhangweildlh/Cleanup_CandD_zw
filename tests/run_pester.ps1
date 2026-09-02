@@ -27,22 +27,6 @@ if (-not (Test-Path -LiteralPath $TestFile)) {
     exit 2
 }
 
-# ---- 环境块裁剪（Pester 3.4.0 Add-Type 子进程限制 ≤ 65535 字节）----
-# 保留运行时必需项，其余一律剔除后再导入 Pester。
-$keep = @(
-    'PATH', 'SystemRoot', 'TEMP', 'TMP', 'USERPROFILE', 'USERNAME',
-    'PROGRAMFILES', 'PROGRAMW6432', 'PROGRAMFILES(X86)', 'PROGRAMDATA',
-    'WINDIR', 'COMSPEC', 'PATHEXT', 'PROCESSOR_ARCHITECTURE',
-    'PUBLIC', 'ALLUSERSPROFILE', 'APPDATA', 'LOCALAPPDATA',
-    'GITHUB_ACTIONS', 'GITHUB_REPOSITORY', 'GITHUB_WORKSPACE',
-    'CODEBUDDY_SAFE_DELETE_TRASH_BIN', 'GENIE_TRASH_DIR'
-)
-foreach ($k in @([Environment]::GetEnvironmentVariables().Keys)) {
-    if ($keep -notcontains $k) {
-        try { [Environment]::SetEnvironmentVariable($k, $null) } catch { }
-    }
-}
-
 # ---- 导入 Pester 3.4.0 ----
 try {
     Import-Module Pester -RequiredVersion 3.4.0 -ErrorAction Stop

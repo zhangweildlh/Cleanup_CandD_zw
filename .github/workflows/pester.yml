@@ -21,11 +21,11 @@ jobs:
           Install-Module -Name Pester -RequiredVersion 3.4.0 -Force -Scope CurrentUser -SkipPublisherCheck
           Get-Module -ListAvailable Pester | Select-Object Name, Version
 
-      - name: Run Pester suite via run_pester.ps1
+      - name: Run Pester suite
         shell: powershell
         run: |
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-          & .\tests\run_pester.ps1 .\tests\cleanup_candd.tests.ps1
+          .\tests\run_pester.ps1
           if ($LASTEXITCODE -ne 0) {
               Write-Error "Pester tests failed with exit code $LASTEXITCODE"
               exit 1
