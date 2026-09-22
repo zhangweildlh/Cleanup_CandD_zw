@@ -34,6 +34,18 @@ $auditScript = Join-Path $here 'tools\Invoke-PSAstAudit.ps1'
 # 与 winapp2_expand.ps1 内部展开 %Temp% 的来源保持一致，避免探测文件错位。
 $tmp = [System.IO.Path]::GetTempPath()
 
+# 密封扫描根基（-Root 现场扫描专用）：必须同时规避产品的两处「路径内容」陷阱：
+#   陷阱1（AppData 误判）：cleanup_cd.ps1 的 Classify-AppData 把路径中「appdata\local\」之后的
+#     第一段当作 AppData 应用段；CI 的 $env:TEMP 为 C:\Users\runneradmin\AppData\Local\Temp，
+#     若扫描根落入其中，全部文件被误判为"系统/内置 AppData -> 保留" -> 规划项归零 -> exit 1。
+#   陷阱2（AI_Work_Temp 整树例外）：产品对任意祖先目录名为 AI_Work_Temp 的整棵树做"保留"例外；
+#     本仓库在本机位于 D:\Documents\AI_Work_Temp\ 之下，若扫描根放在仓库内，整树判保留 -> exit 1。
+# 因此扫描基目录必须既不在 appdata\local\ 之下、也不在 AI_Work_Temp 之下。
+# 选用 $env:USERPROFILE 下的专用子目录：本机为 C:\Users\15794\zw_pester_scanroots，
+# CI 为 C:\Users\runneradmin\zw_pester_scanroots，两者均规避上述两陷阱，且与仓库位置解耦。
+$scanBase = Join-Path $env:USERPROFILE 'zw_pester_scanroots'
+if (-not (Test-Path -LiteralPath $scanBase)) { New-Item -ItemType Directory -Path $scanBase -Force | Out-Null }
+
 # ===================== 公共辅助 =====================
 
 # 准备探测文件（让 DetectFile 通过，使条目被判定为"已装"而产出处置行）
@@ -828,7 +840,7 @@ $csvHeader
 Describe 'C6 cleanup_cd — 现场扫描（-Root，Scheme D 分类）' {
 
     It '普通目录：.tmp/.log->Delete，普通 .txt->Keep(保留跳过)' {
-        $scanRoot = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $scanRoot = Join-Path $scanBase ('zw_pester_scan_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $scanRoot -Force | Out-Null
         # 写入内容避免被当作 0 字节空文件（空文件分类为 Confirm 而非 Delete）
         $junkTmp = Join-Path $scanRoot 'junk.tmp'
@@ -851,7 +863,7 @@ Describe 'C6 cleanup_cd — 现场扫描（-Root，Scheme D 分类）' {
     }
 
     It 'DryRun 现场扫描零副作用：目标文件在扫描前后均存在且内容不变' {
-        $scanRoot = Join-Path $tmp ('zw_pester_side_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $scanRoot = Join-Path $scanBase ('zw_pester_side_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $scanRoot -Force | Out-Null
         $f = Join-Path $scanRoot 'payload.tmp'
         [System.IO.File]::WriteAllText($f, 'SENTINEL-PAYLOAD', [System.Text.UTF8Encoding]::new($false))
@@ -865,7 +877,7 @@ Describe 'C6 cleanup_cd — 现场扫描（-Root，Scheme D 分类）' {
     }
 
     It '临时目录(temp)：其下 .tmp/.log/普通.txt 一律 Delete(自动清理，需清空)' {
-        $scanRoot = Join-Path $tmp ('zw_pester_temp_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $scanRoot = Join-Path $scanBase ('zw_pester_temp_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $scanRoot -Force | Out-Null
         New-Item -ItemType File -Path (Join-Path $scanRoot 'a.tmp') -Force | Out-Null
         New-Item -ItemType File -Path (Join-Path $scanRoot 'b.log') -Force | Out-Null
@@ -881,7 +893,7 @@ Describe 'C6 cleanup_cd — 现场扫描（-Root，Scheme D 分类）' {
 Describe 'C7 cleanup_cd — 自动清理目录（清空内容，保留壳）v0.5.0' {
 
     It '规则1(名恰为 temp/cache/.tmp/.cache)：其下直接子项全删、目录自身不进计划' {
-        $autoRoot = Join-Path $tmp ('zw_pester_auto1_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $autoRoot = Join-Path $scanBase ('zw_pester_auto1_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $autoDir = Join-Path $autoRoot 'temp'
         New-Item -ItemType Directory -Path $autoDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $autoDir 'sub') -Force | Out-Null
@@ -899,7 +911,7 @@ Describe 'C7 cleanup_cd — 自动清理目录（清空内容，保留壳）v0.5
     }
 
     It '规则2(AI_Work_Temp 整树例外)：其内部 temp 子目录内容不进计划，同级普通 temp 仍清空' {
-        $root = Join-Path $tmp ('zw_pester_auto2_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $root = Join-Path $scanBase ('zw_pester_auto2_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $aiDir = Join-Path $root 'AI_Work_Temp'
         $aiTemp = Join-Path $aiDir 'temp'
         $plainTemp = Join-Path $root 'temp'
@@ -956,7 +968,12 @@ $csvHeader
     It '未提供 -Root 与 -CsvPaths：exit 1（参数错误）' {
         $outMd = Join-Path $tmp ('zw_pester_noinput_' + [guid]::NewGuid().ToString('N') + '.md')
         $outCsv = Join-Path $tmp ('zw_pester_noinput_' + [guid]::NewGuid().ToString('N') + '_files.csv')
-        $output = & $cleanupScript -OutMd $outMd -OutCsv $outCsv
+        # 业务脚本对"无 -Root/-CsvPaths"走 Write-Error + exit 1（预期错误路径）。
+        # 运行器顶层 $ErrorActionPreference='Stop' 会将该 Write-Error 提升为终止错误而中断整套件，
+        # 故此处临时降级为 Continue，使脚本能落到 exit 1、$LASTEXITCODE 取到 1，断言方可成立。
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $output = & $cleanupScript -OutMd $outMd -OutCsv $outCsv } finally { $ErrorActionPreference = $prevEap }
         $code = $LASTEXITCODE
         $code | Should Be 1
         Remove-Item $outMd -Force -ErrorAction SilentlyContinue
@@ -1226,7 +1243,7 @@ Describe 'F2 cleanup_cd — 编码回退与 CSV 解析边界（RFC4180）' {
 Describe 'F3 cleanup_cd — 扫描深度边界与受保护片段（扫描模式）' {
 
     It '-MaxDepth 1：更深层目录被跳过，仅顶层文件入计划' {
-        $root = Join-Path $tmp ('zw_pester_depth_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $root = Join-Path $scanBase ('zw_pester_depth_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $lvl1 = Join-Path $root 'lvl1'
         $lvl2 = Join-Path $lvl1 'lvl2'
         New-Item -ItemType Directory -Path $lvl2 -Force | Out-Null
@@ -1243,7 +1260,7 @@ Describe 'F3 cleanup_cd — 扫描深度边界与受保护片段（扫描模式�
     }
 
     It '受保护片段（.workbuddy）目录下的文件在扫描模式被判保留，不进计划' {
-        $root = Join-Path $tmp ('zw_pester_prot_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $root = Join-Path $scanBase ('zw_pester_prot_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $pb = Join-Path $root '.workbuddy'
         New-Item -ItemType Directory -Path $pb -Force | Out-Null
         $inside = Join-Path $pb 'memory.tmp'
@@ -1405,12 +1422,255 @@ Describe 'F5 AST 审计 — 批量输入与聚合输出' {
 
 # ===================== Z. 收尾：测试零残留（自清理 + 自证） =====================
 # 所有临时产物统一使用 zw_pester_ 前缀，收尾时按前缀整批回收。
+# ===================== H2 新增功能单元测试（H6/H5/M2/M3/H1/L1 等缺陷的针对性覆盖） =====================
+# 通过 AST 提取内部函数体 dot-source，对本次新增/改动的函数做白盒断言；
+# 通过 Invoke-Cleanup 黑盒驱动，对 -Aggressive / -NoSystemExclude 等新增开关做端到端断言。
+Describe 'H2 新增功能与修复锁定' {
+
+    It 'T1 Format-LongPath 四类输入（普通/UNC/已带前缀/盘符根）' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Format-LongPath')
+        . $p
+        (Format-LongPath 'C:\foo\bar.txt') | Should Be '\\?\C:\foo\bar.txt'
+        (Format-LongPath '\\server\share\x.txt') | Should Be '\\?\UNC\server\share\x.txt'
+        (Format-LongPath '\\?\C:\foo') | Should Be '\\?\C:\foo'          # 幂等
+        (Format-LongPath 'C:\') | Should Be '\\?\C:\'                    # 盘符根（守卫在 Remove-OneItem，此处仅验证前缀）
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T2 Convert-LongPathBack 反向还原三类路径' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Convert-LongPathBack')
+        . $p
+        (Convert-LongPathBack '\\?\C:\foo') | Should Be 'C:\foo'
+        (Convert-LongPathBack '\\?\UNC\server\share\x') | Should Be '\\server\share\x'
+        (Convert-LongPathBack 'C:\foo') | Should Be 'C:\foo'             # 无前缀原样返回
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T3 Test-Admin 返回类型必须为 [bool]（不被 Write-Output 污染）' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Test-Admin')
+        . $p
+        $r = Test-Admin
+        ($r -is [bool]) | Should Be $true
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T4 Test-DangerousRoot 盘符根/UNC共享根守卫（H6）' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Test-DangerousRoot', 'Test-PathPrefix')
+        . $p
+        (Test-DangerousRoot 'C:\') | Should Be $true
+        (Test-DangerousRoot 'C:') | Should Be $true
+        (Test-DangerousRoot '\\server') | Should Be $true
+        (Test-DangerousRoot '\\server\share') | Should Be $true
+        (Test-DangerousRoot '') | Should Be $true
+        (Test-DangerousRoot 'C:\Windows') | Should Be $false
+        (Test-DangerousRoot 'D:\Data\junk') | Should Be $false
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T5 Test-PathPrefix 边界匹配（避免 C:\Windows 误匹配 C:\WindowsApps）' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Test-PathPrefix')
+        . $p
+        (Test-PathPrefix 'C:\Windows\foo' 'C:\Windows') | Should Be $true
+        (Test-PathPrefix 'C:\Windows' 'C:\Windows') | Should Be $true
+        (Test-PathPrefix 'C:\WindowsApps' 'C:\Windows') | Should Be $false
+        (Test-PathPrefix 'C:\Windows.old' 'C:\Windows') | Should Be $false
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T6 Expand-PendingDelete 非空目录递归展开 + 子项先于父项 + UNC 前缀（H5+M2）' {
+        # 构建非空目录树：d\f1, d\sub\f2
+        $d = Join-Path $tmp ('zw_pester_pend_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $sub = Join-Path $d 'sub'
+        New-Item -ItemType Directory -Path $sub -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $d 'f1.txt'), 'x', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $sub 'f2.txt'), 'x', [System.Text.UTF8Encoding]::new($false))
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Expand-PendingDelete', 'Format-LongPath', 'Convert-LongPathBack')
+        . $p
+        # 用 @(...) 强制数组化：PS 5.1 会把单元素集合拆包为标量，导致 .Count 为 $null；
+        # 生产代码以 foreach 遍历（对标量/集合均安全），此处仅断言需显式数组化。
+        $pairs = @(Expand-PendingDelete -Path $d)
+        # d 自身 + f1 + sub + f2 = 4 条
+        $pairs.Count | Should Be 4
+        # 全部 dest 为空串
+        (@($pairs | Where-Object { $_.Dest -ne '' })).Count | Should Be 0
+        # 全部本地项用 \??\ 前缀
+        (@($pairs | Where-Object { -not $_.Source.StartsWith('\??\') })).Count | Should Be 0
+        # 排序正确性：最深路径（f2.txt）必须排在最前（父路径是子路径前缀 ⇒ 子更长，降序即子先父后）
+        $srcs = @($pairs.Source)
+        $srcs[0] | Should Match 'f2\.txt'
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+
+        # M2：UNC 路径用 \??\UNC\ 前缀（无真实共享，仅验证前缀规范化）
+        $p2 = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Expand-PendingDelete', 'Format-LongPath', 'Convert-LongPathBack')
+        . $p2
+        $upairs = @(Expand-PendingDelete -Path '\\fakehost\share\file.txt')
+        $upairs.Count | Should Be 1
+        $upairs[0].Source | Should Be '\??\UNC\fakehost\share\file.txt'
+        Remove-Item $p2 -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T7 -Aggressive 端到端冒烟：开关被接受、不破坏既有分类契约' {
+        $csv = New-TempCsv -content @'
+$csvHeader
+"D:\Agg\real.tmp",".tmp","0.01","2026-01-01 00:00:00","Applications","自动清理","普通删除"
+"D:\Agg\keep.txt",".txt","0.001","2026-01-01 00:00:00","User","保留","用户保留"
+'@
+        $r = Invoke-Cleanup -CsvPaths $csv -Extra @{ Aggressive = $true }
+        $r.Code | Should Be 0
+        $plan = @(Import-Csv $r.OutCsv)
+        (@($plan | Where-Object { $_.FullPath -like '*\Agg\real.tmp' -and $_.Intent -eq 'Delete' })).Count | Should Be 1
+        (@($plan | Where-Object { $_.FullPath -like '*\Agg\keep.txt' })).Count | Should Be 0
+        Remove-Item $csv -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T8 -NoSystemExclude 与 -ExcludeRoots 同时生效（M5 修复：不被静默忽略）' {
+        # 关键回归：旧实现中 -ExcludeRoots 会让 -NoSystemExclude 整体失效且无提示。
+        # 此处以「组合不报错 + 退出码 0 + 既有权限降级契约不变」锁定修复。
+        $csv = New-TempCsv -content @'
+$csvHeader
+"D:\NS\junk.tmp",".tmp","0.01","2026-01-01 00:00:00","Applications","自动清理","普通删除"
+'@
+        $r = Invoke-Cleanup -CsvPaths $csv -Extra @{ ExcludeRoots = @('D:\NS\irrelevant'); NoSystemExclude = $true }
+        $r.Code | Should Be 0
+        $plan = @(Import-Csv $r.OutCsv)
+        (@($plan | Where-Object { $_.FullPath -like '*\NS\junk.tmp' -and $_.Intent -eq 'Delete' })).Count | Should Be 1
+        Remove-Item $csv -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T9 H1 非交互守卫已落地（[Environment]::UserInteractive 短路 Read-Host）' {
+        $src = [System.IO.File]::ReadAllText($cleanupScript)
+        ($src -match 'UserInteractive') | Should Be $true
+    }
+
+    It 'T10 L1 重启删除退出码 4 已声明并在主流程生效（HasPendingReboot）' {
+        $src = [System.IO.File]::ReadAllText($cleanupScript)
+        ($src -match 'HasPendingReboot') | Should Be $true
+        # .OUTPUTS 声明了退出码 0/1/2/3/4 全链
+        ($src -match '4 = 存在已注册、需重启后删除的项') | Should Be $true
+    }
+}
+
+# ===================== H3 AppData 条件保留（规则#2/#3/#4）逻辑锁定 =====================
+# 白盒：AST 提取 Normalize-SoftwareToken / Test-InstalledSoftwareMatch / Classify-AppData
+# 到同一临时 .ps1，并注入确定性 $script: 状态（函数体与赋值同文件，$script: 解析到同一
+# 文件作用域，一致），对三级覆盖、字体/系统/已装/孤儿判定做断言。
+# 黑盒：合成 AppData 树走真实 -Root 扫描，断言扫描表 OutScanCsv 的 Cleanable 列
+# （字体/系统内置->保留，孤儿->需确认；配置驱动，不依赖本机真实软件清单，确定性）。
+
+Describe 'H3 AppData 条件保留 — 白盒逻辑锁定' {
+
+    $astFile = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Normalize-SoftwareToken', 'Test-InstalledSoftwareMatch', 'Classify-AppData')
+    # 注入确定性 $script: 状态：函数体与赋值同文件，$script: 解析一致
+    $inject = @'
+$script:InstalledTokens = @('everything','potplayer','thunder','wpsoffice','directoryopus','360chrome','kingsoft','ticktick','wps','nvidia','vmware','opera','doubaoime','sogouexplorer','2345pic','adobe')
+$script:AppDataAliases = @(
+  @{ appDataDir='GPSoftware'; software='Directory Opus' },
+  @{ appDataDir='360Se6'; software='360Chrome' },
+  @{ appDataDir='thunder'; software='Thunder' },
+  @{ appDataDir='kingsoft'; software='WPS' },
+  @{ appDataDir='Tick_Tick'; software='TickTick' },
+  @{ appDataDir='Daum'; software='PotPlayer' },
+  @{ appDataDir='WXWorkLocal'; software='WXWork' },
+  @{ appDataDir='Opera'; software='Opera' },
+  @{ appDataDir='NVIDIA'; software='NVIDIA' },
+  @{ appDataDir='VMware'; software='VMware' }
+)
+$script:SystemAppDataDirs = @('microsoft','windows','classes','packages','temp','amd','nvidia','intel','ati','google','mozilla','apple','java','python','nodejs','skype','adobe','oracle')
+'@
+    Add-Content -Path $astFile -Value $inject -Encoding ascii
+    . $astFile
+
+    It 'T11 Normalize-SoftwareToken：去非字母数字 + 转小写 + 空值返回空串' {
+        (Normalize-SoftwareToken 'WPS Office') | Should Be 'wpsoffice'
+        (Normalize-SoftwareToken '360Chrome') | Should Be '360chrome'
+        (Normalize-SoftwareToken '') | Should Be ''
+        (Normalize-SoftwareToken $null) | Should Be ''
+    }
+
+    It 'T12 Test-InstalledSoftwareMatch：精确 / 双向子串 / 显式别名命中 + 孤儿返回 $null' {
+        (Test-InstalledSoftwareMatch -AppSeg 'kingsoft') | Should Be 'WPS'          # 别名 kingsoft->WPS，命中已装 token wps
+        (Test-InstalledSoftwareMatch -AppSeg 'thunder') | Should Be 'Thunder'       # 别名 thunder->Thunder
+        (Test-InstalledSoftwareMatch -AppSeg 'potplayer') | Should Be 'potplayer'   # 精确 token
+        (Test-InstalledSoftwareMatch -AppSeg 'WPSoffice') | Should Be 'wpsoffice'   # 精确（大小写归一）
+        (Test-InstalledSoftwareMatch -AppSeg '360Se6') | Should Be '360Chrome'       # 别名 360Se6->360Chrome
+        ($null -eq (Test-InstalledSoftwareMatch -AppSeg 'Microsoft')) | Should Be $true   # 未装、无别名 -> 孤儿
+        ($null -eq (Test-InstalledSoftwareMatch -AppSeg 'GhostAppXYZ')) | Should Be $true # 孤儿
+    }
+
+    It 'T13 Classify-AppData 规则#2：用户字体目录一律保留（C/D 双方案）' {
+        $rC = Classify-AppData -Path 'C:\Users\X\AppData\Local\Microsoft\Windows\Fonts\a.ttf' -Scheme 'C'
+        $rC.Cleanable | Should Be '否'
+        $rC.Category | Should Be '用户字体'
+        $rD = Classify-AppData -Path 'C:\Users\X\AppData\Local\Microsoft\Windows\Fonts\sub\b.ttf' -Scheme 'D'
+        $rD.Cleanable | Should Be '保留'
+    }
+
+    It 'T14 Classify-AppData：系统/内置子目录保留（判定先于软件匹配）' {
+        $r = Classify-AppData -Path 'C:\Users\X\AppData\Roaming\Microsoft\Edge\a.txt' -Scheme 'D'
+        $r.Cleanable | Should Be '保留'
+        $r.Category | Should Be '系统/内置 AppData'
+        $r2 = Classify-AppData -Path 'C:\Users\X\AppData\Local\nvidia\drv\a.sys' -Scheme 'C'
+        $r2.Cleanable | Should Be '否'
+    }
+
+    It 'T15 Classify-AppData：已装/绿色部署软件数据保留（规则#3/#4）' {
+        $r = Classify-AppData -Path 'C:\Users\X\AppData\Roaming\kingsoft\cfg\a.txt' -Scheme 'D'
+        $r.Cleanable | Should Be '保留'
+        ($r.Reason -match 'WPS') | Should Be $true
+        $r2 = Classify-AppData -Path 'C:\Users\X\AppData\Roaming\Tick_Tick\b.json' -Scheme 'C'
+        $r2.Cleanable | Should Be '否'
+        ($r2.Reason -match 'TickTick') | Should Be $true
+    }
+
+    It 'T16 Classify-AppData：孤儿（未匹配）保守标记需确认/谨慎' {
+        $rC = Classify-AppData -Path 'C:\Users\X\AppData\Local\GhostAppXYZ\a.txt' -Scheme 'C'
+        $rC.Cleanable | Should Be '谨慎'
+        ($rC.Reason -match 'GhostAppXYZ') | Should Be $true
+        $rD = Classify-AppData -Path 'C:\Users\X\AppData\Roaming\ZombieSoft\a.txt' -Scheme 'D'
+        $rD.Cleanable | Should Be '需确认'
+    }
+
+    It 'T17 Classify-AppData：非 AppData 路径返回 $null（不拦截其他分类）' {
+        ($null -eq (Classify-AppData -Path 'C:\Users\X\Documents\a.txt' -Scheme 'C')) | Should Be $true
+        ($null -eq (Classify-AppData -Path 'D:\Data\junk.tmp' -Scheme 'D')) | Should Be $true
+    }
+
+    Remove-Item $astFile -Force -ErrorAction SilentlyContinue
+}
+
+Describe 'H3b AppData 条件保留 — 黑盒集成（-Root 现场扫描）' {
+
+    It 'T18 -Root 扫描 AppData 树：字体/系统内置->保留、孤儿->需确认（配置驱动，确定性）' {
+        $scanRoot = Join-Path $scanBase ('zw_pester_appdata_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $fontDir = Join-Path $scanRoot 'AppData\Local\Microsoft\Windows\Fonts'
+        $sysDir = Join-Path $scanRoot 'AppData\Roaming\Microsoft\Edge'
+        $orphanDir = Join-Path $scanRoot 'AppData\Local\GhostAppXYZ'
+        New-Item -ItemType Directory -Path $fontDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $sysDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $orphanDir -Force | Out-Null
+        $fFont = Join-Path $fontDir 'a.ttf'
+        $fSys = Join-Path $sysDir 'b.txt'
+        $fOrphan = Join-Path $orphanDir 'c.txt'
+        [System.IO.File]::WriteAllText($fFont, 'f', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($fSys, 's', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($fOrphan, 'o', [System.Text.UTF8Encoding]::new($false))
+        $r = Invoke-Cleanup -CsvPaths @() -Scheme D -Mode DryRun -Extra @{ Root = $scanRoot }
+        $r.Code | Should Be 0
+        $scan = @(Import-Csv $r.OutScanCsv)
+        (@($scan | Where-Object { $_.FullPath -like '*\Fonts\a.ttf' -and $_.Cleanable -eq '保留' })).Count | Should Be 1
+        (@($scan | Where-Object { $_.FullPath -like '*\Microsoft\Edge\b.txt' -and $_.Cleanable -eq '保留' })).Count | Should Be 1
+        (@($scan | Where-Object { $_.FullPath -like '*\GhostAppXYZ\c.txt' -and $_.Cleanable -eq '需确认' })).Count | Should Be 1
+        Remove-Item $scanRoot -Force -Recurse -ErrorAction SilentlyContinue
+    }
+}
+
 # 这一条既是卫生要求，也是"测试不污染宿主环境"的可验证断言。
 
 Describe 'Z 收尾：测试零残留（自证 + 自清理）' {
 
     It '-Root 扫描产物落在 zw_pester_ 前缀路径（不写默认名 scan_inventory_*）' {
-        $root = Join-Path $tmp ('zw_pester_scanout_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $root = Join-Path $scanBase ('zw_pester_scanout_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $root -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $root 'a.tmp'), 'x', [System.Text.UTF8Encoding]::new($false))
         $r = Invoke-Cleanup -CsvPaths @() -Scheme D -Mode DryRun -Extra @{ Root = $root }

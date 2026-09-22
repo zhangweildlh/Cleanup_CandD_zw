@@ -8,7 +8,7 @@ on:
 
 jobs:
   pester:
-    name: Run Pester test suite (PowerShell 5.1 / Pester 3.4.0)
+    name: Pester Tests
     runs-on: windows-latest
     steps:
       - name: Checkout repository
