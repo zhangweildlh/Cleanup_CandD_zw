@@ -1,86 +1,208 @@
 ﻿<#
 .SYNOPSIS
-    磁盘垃圾文件「扫描 + 清理」一体化脚本（通用、可移植、DryRun 默认、零副作用）
-.DESCRIPTION
-    将「清单扫描」与「清理规划/执行」合并为单一工作流：
-
-      [可选 -Root 现场扫描] --> 生成处置清单 CSV（FullPath,Extension,SizeMB,LastWriteTime,Category,Cleanable,Reason）
-                              \
-                               --> [既有 -CsvPaths 清单] --(合并)--> 加载 --> 标签->处置映射 --> 规划 --> (DryRun 输出 | Execute 删除)
-
-    1) 若提供 -Root：递归枚举该根目录，依据「路径片段 / 扩展名 / 文件大小 / 修改时间」分类，
-       实时写出与 full_inventory2/3.csv 同构的 CSV（带 BOM、RFC4180 引号），随后将其并入待清理清单。
-    2) 若提供 -CsvPaths：直接读取既有处置清单（兼容原 scan2/scan3 产物）。
-    3) 二者可同时提供（先扫描、再叠加既有清单）；若都不提供则报错退出。
-    4) 加载后统一经「标签->处置映射层」规划三类处置：
-         - 自动清理 / 是          -> 确定拟删除
-         - 需确认 / 谨慎          -> 默认不删，列为待确认
-         - 保留 / 否 / 受保护 / 未知 -> 永不删除（保守默认）
-    5) 默认 Mode=DryRun：只把拟删除清单输出到 Markdown 与完整 CSV，绝不触碰任何文件。
-       显式 -Mode Execute 才执行删除；可加 -WhatIf 做"模拟删除"试运行。
-
-    分类规则从既有 full_inventory2.csv（C 盘，Cleanable∈{是,否,谨慎}）与
-    full_inventory3.csv（D 盘，Cleanable∈{自动清理,需确认,保留}）反推，分两套标签体系：
-      - 方案 C（默认用于系统盘）：Cleanable ∈ {是, 否, 谨慎}
-      - 方案 D（默认用于其它盘）：Cleanable ∈ {自动清理, 需确认, 保留}
-
-    三层硬保护（保证对 Windows 系统 / 已装程序 / 工作目录 / 个人文档零破坏）：
-      1) 安全根拦截：凡拟删除项落在任一"安全根目录"下，一律提升为"需二次确认（按目录批量）"，
-         即便其原本为自动清理。安全根来源（按优先级，全部可配置、无本机硬编码）：
-           a. 环境变量 CLEANUP_SAFE_ROOTS（分号分隔）
-           b. -SafeRoots 参数（追加）
-           c. 外置配置文件 cleanup_config.json 的 safeRoots
-           d. 运行时自动探测的"用户个人目录"（桌面/文档/下载/图片/视频/音乐，经注册表 Known Folder 解析）
-      2) 系统核心保护：凡拟删除项落在系统核心目录（自动探测的 Windows / Program Files /
-         Program Files (x86) / ProgramData）下，强制降为"待确认"，绝不自动删除。
-         除非显式 -AllowSystemJunk 且该项命中"已知垃圾热点"（如 Windows 更新下载缓存）。
-      3) 版本控制保护：.git / .svn / .hg 目录下的内容一律保留，永不删除（防止误删 reflog 等引用数据）。
-
-    编码健壮性：CSV 读取使用自研 StreamReader + BOM 探测 + RFC4180 引号解析，
-    兼容 UTF-8（有/无 BOM）、UTF-16 LE/BE 与 GBK（无 BOM 时按字节特征回退）；
-    扫描写出使用 UTF-8 带 BOM 的 StreamWriter。删除一律使用 -LiteralPath 与底层 .NET API，
-    避免特殊字符路径被通配符误解释。
+    磁盘垃圾扫描与清理一体化脚本：DryRun 默认零副作用、三层硬保护、可移植、支持全盘激进清理。
+    将「清单扫描」与「清理规划/执行」合并为单一工作流，目标是在不影响 Windows 系统与已装软件
+    正常运行的前提下，尽量腾出磁盘空间（系统/软件可重新下载衍生的文件与缓存，不含个人配置）。
 
 .PARAMETER Root
-    扫描根目录（可选），例如 C:\ 或 D:\。提供即现场扫描并并入待清理清单。
+    【用途】指定要现场扫描的根目录（如 C:\），脚本递归枚举其下文件/目录，按规则分类并并入待清理清单。
+    【用法】-Root C:\   或   -Root "D:\Temp"
+    【注意事项】
+      · 与 -CsvPaths 可同时提供（先扫描再叠加既有清单）；二者都不提供则报错退出（exit 1）。
+      · 全盘扫描（如 -Root C:\）可能耗时较长并触及大量系统目录；默认 ExcludeRoots 已排除系统核心目录，
+        须配合 -NoSystemExclude 才真正进入系统目录。
+      · 扫描写出 CSV 默认落 $env:TEMP\scan_inventory_<盘符>.csv，可用 -OutScanCsv 改路径。
+    【示例】
+      .\cleanup_cd.ps1 -Root C:\ -Mode DryRun
+      .\cleanup_cd.ps1 -Root C:\ -NoSystemExclude -Aggressive -Mode DryRun
+
 .PARAMETER CsvPaths
-    一个或多个既有处置清单 CSV（字段见上）。可同时传入 C 盘与 D 盘清单。与 -Root 可同时提供。
+    【用途】直接读取既有的处置清单 CSV（兼容 full_inventory2/3.csv 同构产物），跳过现场扫描。
+    【用法】-CsvPaths .\scan2.csv   或   -CsvPaths scan2.csv,scan3.csv
+    【注意事项】
+      · CSV 字段需含 FullPath,Category,Cleanable 等（RFC4180 引号、BOM 自动探测）。
+      · 可同时传入 C 盘与 D 盘清单（分两套标签体系，由 Scheme/Auto 决定）。
+      · 与 -Root 叠加时先扫描再合并。
+    【示例】
+      .\cleanup_cd.ps1 -CsvPaths .\full_inventory2.csv -Mode DryRun
+
 .PARAMETER Scheme
-    'C' | 'D' | 'Auto'（默认 Auto：落在系统盘用 C 方案，其余用 D 方案；仅对 -Root 扫描生效）。
-.PARAMETER Config
-    外置配置文件路径（JSON）。默认取脚本同目录的 cleanup_config.json。缺失时回退内置默认规则。
+    【用途】选择标签体系：C=系统盘(Cleanable∈{是,否,谨慎})；D=其它盘(∈{自动清理,需确认,保留})；Auto=按盘符自动。
+    【用法】-Scheme C | -Scheme D | 默认 Auto
+    【注意事项】仅对 -Root 现场扫描生效；-CsvPaths 清单自带标签体系，不被强制覆盖。
+    【示例】
+      .\cleanup_cd.ps1 -Root D:\ -Scheme D
+
+.PARAMETER ConfigPath
+    【用途】指定外置 JSON 配置文件（安全根、受保护片段、阈值等）。
+    【用法】-ConfigPath .\cleanup_config.json   （旧别名 -Config 仍可用）
+    【注意事项】
+      · 默认取脚本同目录的 cleanup_config.json；缺失则回退内置默认规则。
+      · ⚠ 命名陷阱：内部参数为 $ConfigPath 而非 $Config。脚本变量 $script:Config 存放配置对象，
+        若参数名也为 $Config 且带 [string] 约束，赋值时会被强制字符串化（安全根/阈值全部失效）。
+        故用 $ConfigPath + [Alias('Config')] 兼容旧用法——请勿改名。
+    【示例】
+      .\cleanup_cd.ps1 -Root C:\ -ConfigPath .\myconfig.json
+
 .PARAMETER ProtectedRoots
-    受保护目录片段（子串匹配，命中即标记"受保护/保留"）。默认取配置文件，缺省为 @('.workbuddy')。
+    【用途】受保护目录片段（子串匹配），命中即标记「受保护/保留」，永不删除。
+    【用法】-ProtectedRoots '.git','node_modules'
+    【注意事项】默认取配置文件，缺省为 @('.workbuddy')。子串匹配可能误伤同名片段，慎用宽泛片段。
+    【示例】
+      -ProtectedRoots '.svn','.hg'
+
 .PARAMETER WorkRoot
-    工作目录根（用于"工作目录受保护文件"判定）。默认取配置文件的 workRoots 首项。
+    【用途】工作目录根，用于「工作目录受保护文件」判定。
+    【用法】-WorkRoot D:\MyProject
+    【注意事项】默认取配置文件的 workRoots 首项；留空则用内置默认。
+    【示例】
+      -WorkRoot D:\Dev
+
 .PARAMETER ExcludeRoots
-    跳过枚举的目录（默认含系统核心目录，避免无意义扫描与权限报错）。传 @() 可扫描全部。
+    【用途】跳过枚举的目录（不扫描其下内容），降低无意义扫描与权限报错。
+    【用法】-ExcludeRoots 'C:\VeryBig','D:\Archive'
+    【注意事项】
+      · 默认含系统核心目录（Windows/Program Files/ProgramData），避免扫描系统盘。
+      · 传 @() 可清空默认排除、扫描全部；配合 -NoSystemExclude 才真正进入系统目录。
+      · ⚠ M5 修复：-NoSystemExclude 会强制从最终排除列表剔除系统核心目录，
+        即使显式传入 -ExcludeRoots 含系统目录也会被覆盖。
+    【示例】
+      -ExcludeRoots @() -NoSystemExclude
+
 .PARAMETER RecentDays
-    近期缓存阈值（天），默认取配置文件（缺省 180）。超过则不再判为"缓存-近期(保留)"。
+    【用途】近期缓存阈值（天），超过该天数的缓存不再判为「缓存-近期(保留)」，可进入清理候选。
+    【用法】-RecentDays 180   （默认取配置文件，缺省 180）
+    【注意事项】值 -1 表示「沿用配置/内置默认」，并非「不限制」。
+    【示例】
+      -RecentDays 90
+
 .PARAMETER Mode
-    DryRun（默认，仅输出，零副作用）| Execute（执行删除）。
+    【用途】运行模式。DryRun（默认，仅输出报告，零副作用）/ Execute（执行删除）。
+    【用法】-Mode DryRun | -Mode Execute
+    【注意事项】
+      · 默认 DryRun，即使用户忘了指定也绝不删文件——这是安全兜底。
+      · Execute 下的删除仍受三层硬保护约束。
+    【示例】
+      -Mode Execute -WhatIf
+
 .PARAMETER SafeRoots
-    需二次确认的安全根目录列表（**追加**，无法移除配置文件与自动探测所确定的安全根）。
+    【用途】追加「需二次确认」的安全根目录列表（按目录批量确认才删）。
+    【用法】-SafeRoots 'D:\MyDocs','C:\Users\Me'
+    【注意事项】
+      · 是「追加」，无法移除配置文件与自动探测（桌面/文档/下载等 Known Folder）确定的安全根。
+      · 落在安全根下的自动清理项会被提升为「需二次确认」，即便原本可直删。
+    【示例】
+      -SafeRoots 'D:\Important'
+
 .PARAMETER OutMd
-    DryRun 输出的 Markdown 报告路径。默认写入 $env:TEMP，避免污染脚本所在仓库。
+    【用途】DryRun 输出的 Markdown 报告路径。
+    【用法】-OutMd .\report.md
+    【注意事项】默认写入 $env:TEMP，避免污染脚本所在仓库；建议指定到隔离目录。
+    【示例】
+      -OutMd D:\Reports\cleanup.md
+
 .PARAMETER OutCsv
-    逐文件完整处置清单 CSV 路径（与 MD 互补，保证绝对路径不丢失）。默认写入 $env:TEMP。
+    【用途】逐文件完整处置清单 CSV 路径（与 MD 互补，保证绝对路径不丢失）。
+    【用法】-OutCsv .\full_plan.csv
+    【注意事项】默认写入 $env:TEMP。
+    【示例】
+      -OutCsv D:\Reports\plan.csv
+
 .PARAMETER OutScanCsv
-    -Root 扫描输出的清单 CSV 路径。默认写入 $env:TEMP 的 scan_inventory_<盘符>.csv。
+    【用途】-Root 扫描输出的清单 CSV 路径。
+    【用法】-OutScanCsv .\my_scan.csv
+    【注意事项】默认写入 $env:TEMP\scan_inventory_<盘符>.csv（无前缀，测试产物需自行清理）。
+    【示例】
+      -OutScanCsv D:\Reports\scan_c.csv
+
 .PARAMETER DeleteConfirmed
-    仅 Execute 模式有效：是否同时删除非安全根的"需确认"项与"系统核心降级"项（默认关闭，仅删自动清理 + 安全根已确认项）。
+    【用途】仅 Execute 模式有效：同时删除非安全根的「需确认」项与「系统核心降级」项。
+    【用法】-DeleteConfirmed
+    【注意事项】默认关闭，仅删「自动清理」项 + 安全根已确认项；
+      开启后会删除更多项，务必先 DryRun 审阅报告再决定。
+    【示例】
+      -Mode Execute -DeleteConfirmed
+
 .PARAMETER AllowSystemJunk
-    仅 Execute 模式有效：对命中"已知垃圾热点"的项，即使位于系统核心目录也不强制降级为待确认。
-    默认关闭（保守）：系统核心目录一律待确认。
+    【用途】仅 Execute 模式有效：对命中「已知垃圾热点」的项，即使位于系统核心目录也不强制降级为待确认。
+    【用法】-AllowSystemJunk
+    【注意事项】默认关闭（保守）。须与 -DeleteConfirmed 配合才真正生效。
+    【示例】
+      -Mode Execute -DeleteConfirmed -AllowSystemJunk
+
 .PARAMETER FullList
-    在 Markdown 中逐文件列出"需确认"与"安全根"项的绝对路径（默认关闭，改为按目录聚合 + 样本，以防 MD 过大）。
+    【用途】在 Markdown 报告中逐文件列出「需确认」与「安全根」项的绝对路径（而非按目录聚合+样本）。
+    【用法】-FullList
+    【注意事项】默认关闭以防 MD 过大；项数极多时开启可能生成超大报告。
+    【示例】
+      -FullList
+
 .PARAMETER MaxDepth
-    扫描最大递归深度保护（0 = 不限制）。默认 0。全盘扫描时建议保留默认，文件系统本身受 MAX_PATH 约束。
+    【用途】扫描最大递归深度保护（0 = 不限制）。
+    【用法】-MaxDepth 10
+    【注意事项】默认 0。全盘扫描时建议保留默认，文件系统本身受 MAX_PATH(260) 约束，过深递归无实际收益。
+    【示例】
+      -MaxDepth 5
+
 .PARAMETER WhatIf
-    仅 Execute 模式有效：模拟删除，仅报告将删除哪些文件/目录，不实际执行删除，也不弹出交互确认。
+    【用途】仅 Execute 模式有效：模拟删除，仅报告将删除哪些文件/目录，不实际删除、不弹交互确认。
+    【用法】-WhatIf
+    【注意事项】是「试运行」最佳方式，可在真实删除前验证范围；不影响 DryRun 模式（DryRun 本身不删）。
+    【示例】
+      -Mode Execute -WhatIf
+
+.PARAMETER Aggressive
+    【用途】激进模式：更多系统目录下的缓存/日志/临时文件被分类为可删除；未知文件也提升为可删除/需确认。
+    【用法】-Aggressive
+    【注意事项】
+      · 仍受安全根与版本控制保护，不会删系统关键文件。
+      · ⚠ 系统目录下的缓存虽判为可清理，仍会经「系统核心降级保护」降为待确认，
+        故仅 -Aggressive 不会自动清理系统缓存，需配合 -DeleteConfirmed。
+      · 建议先 DryRun + -Aggressive 审阅报告再决定。
+    【示例】
+      -Root C:\ -NoSystemExclude -Aggressive -Mode DryRun
+
+.PARAMETER NoSystemExclude
+    【用途】不排除系统核心目录（C:\Windows / Program Files / ProgramData 等），允许扫描这些目录。
+    【用法】-NoSystemExclude
+    【注意事项】
+      · 系统核心目录仍受「系统核心降级保护」（不会自动删除，除非 -DeleteConfirmed）。
+      · 与 -ExcludeRoots 同时使用时，强制从最终排除列表剔除系统核心目录（M5 修复）。
+    【示例】
+      -Root C:\ -NoSystemExclude -Aggressive
+
+.PARAMETER DeleteOnReboot
+    【用途】仅 Execute 模式有效：删除失败（被锁/权限不足）的文件/目录注册到 PendingFileRenameOperations，重启后自动删除。
+    【用法】-DeleteOnReboot
+    【注意事项】
+      · 要求目录为空（非空目录会递归展开其后代再注册）；UNC 路径用 \??\UNC\ 前缀（M2 修复）。
+      · 需要管理员权限；非交互环境（计划任务/CI）下未以管理员运行会自动跳过交互确认仅告警（H1）。
+      · 批量项单次写注册表（M1 修复），重启后生效；退出码 4 表示存在已注册项。
+    【示例】
+      -Mode Execute -DeleteOnReboot
+
+.PARAMETER SkipAclRepair
+    【用途】跳过 ACL 修复（takeown + icacls）。
+    【用法】-SkipAclRepair
+    【注意事项】
+      · ACL 修复「默认启用」——删除失败后会自动尝试接管所有权再重试，这会改写对象 ACL。
+      · 显式指定本开关则仅尝试直接删除（保持旧行为，不碰 ACL）。
+      · 与 -AllowSystemAclRepair 正交：即使不跳过 ACL 修复，系统核心目录下的对象仍默认不改写。
+    【示例】
+      -Mode Execute -SkipAclRepair
+
+.PARAMETER AllowSystemAclRepair
+    【用途】允许对系统核心目录（Windows/Program Files/ProgramData）下的对象执行 ACL 修复。
+    【用法】-AllowSystemAclRepair
+    【注意事项】
+      · 默认关闭：这些目录下的删除失败不做 ACL 改写，避免对系统文件所有权造成不可逆改动（破坏 Windows 资源保护）。
+      · 仅在确有必要且已备份/知晓风险时开启。
+    【示例】
+      -Mode Execute -AllowSystemAclRepair
 
 .OUTPUTS
-    退出码：0 = 成功；1 = 参数/清单错误；2 = Execute 模式下存在删除失败项。
+    退出码：0 = 成功；1 = 参数/清单错误；2 = Execute 模式下存在删除失败项；
+    3 = 用户在管理员自检处选择取消；4 = 存在已注册、需重启后删除的项（重启生效）。
 #>
 
 [CmdletBinding()]
@@ -120,7 +242,24 @@ param(
     [switch]$AllowSystemJunk,
     [switch]$FullList,
     [int]$MaxDepth = 0,
-    [switch]$WhatIf
+    [switch]$WhatIf,
+
+    # 新增参数：激进模式（更积极地分类可删除文件）
+    [switch]$Aggressive,
+
+    # 新增参数：不排除系统核心目录（扫描 C:\Windows / Program Files 等）
+    [switch]$NoSystemExclude,
+
+    # 新增参数：重启后自动删除被锁文件
+    [switch]$DeleteOnReboot,
+
+    # 跳过 ACL 修复（默认**启用** ACL 修复，即删除失败后会自动尝试 takeown + icacls）
+    [switch]$SkipAclRepair,
+
+    # 允许对系统核心目录下的对象执行 ACL 修复
+    # 默认关闭：系统核心目录（Windows / Program Files / ProgramData）下删除失败时不做 ACL 改写，
+    # 避免 takeown/icacls 对系统文件所有权造成不可逆改动（破坏 Windows 资源保护）。
+    [switch]$AllowSystemAclRepair
 )
 
 # ===================== 初始化 =====================
@@ -300,9 +439,6 @@ function Import-CleanupConfig {
 }
 
 $script:Config = Import-CleanupConfig -Path $ConfigPath
-Write-Output ('配置就绪: 安全根 {0} 项 / 受保护片段 {1} 项 / 已知垃圾热点 {2} 条 / 近期缓存阈值 {3} 天' -f
-    @($script:Config.safeRoots).Count, @($script:Config.protectedRoots).Count,
-    @($script:Config.knownJunkTargets).Count, $script:Config.recentDays)
 
 # ---- 分类规则（来自配置，可被 -ProtectedRoots / -RecentDays 覆盖）----
 $Cls = $script:Config.classification
@@ -329,8 +465,32 @@ $SystemProtectedRoots = @(
     (Get-ProgramDataPath)
 ) | Where-Object { $_ } | Sort-Object -Unique
 
-if ($ExcludeRoots.Count -eq 0) {
-    $ExcludeRoots = @($SystemProtectedRoots) + @($script:Config.extraExcludeRoots) | Where-Object { $_ } | Sort-Object -Unique
+# 仅当用户**未显式传入** -ExcludeRoots 时才套用默认值（用 PSBoundParameters 判定，
+# 而非 Count -eq 0：后者会让"显式传入空数组"被误判为未传，导致文档承诺的
+# 「传 @() 可扫描全部」失效）。
+# 修复：无论用户是否传入 -ExcludeRoots，-NoSystemExclude 都必须生效。
+if (-not $PSBoundParameters.ContainsKey('ExcludeRoots')) {
+    # 默认排除系统核心目录（避免权限报错与无意义扫描）。
+    # 指定 -NoSystemExclude 时不排除，允许扫描系统目录（仍受系统核心降级保护）。
+    $ExcludeRoots = if ($NoSystemExclude) { @() } else { @($SystemProtectedRoots) }
+}
+$ExcludeRoots = @($ExcludeRoots) + @($script:Config.extraExcludeRoots) | Where-Object { $_ } | Sort-Object -Unique
+
+# -NoSystemExclude 语义贯彻：最终排除列表中不得残留任何系统核心目录
+# （覆盖"用户显式传入的 ExcludeRoots 里恰好含有系统核心目录"的情形）
+if ($NoSystemExclude) {
+    $beforeCount = @($ExcludeRoots).Count
+    $ExcludeRoots = @($ExcludeRoots) | Where-Object {
+        $hit = $false
+        foreach ($sr in $SystemProtectedRoots) {
+            if (Test-PathPrefix -Path $_ -Prefix $sr) { $hit = $true; break }
+        }
+        -not $hit
+    }
+    $removed = $beforeCount - @($ExcludeRoots).Count
+    if ($removed -gt 0) {
+        Write-Verbose ('-NoSystemExclude: 已从排除列表剔除 {0} 项系统核心目录' -f $removed)
+    }
 }
 
 # ---- 安全根（配置 + 自动探测 + 参数追加；自动探测项不可被移除）----
@@ -346,7 +506,17 @@ $EnvSafeRoots = @()
 $envVal = [Environment]::GetEnvironmentVariable('CLEANUP_SAFE_ROOTS')
 if ($envVal) { $EnvSafeRoots = @($envVal -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 
-$EssentialSafeRoots = @($EnvSafeRoots) + @($script:Config.safeRoots) + @($AutoDetectedSafeRoots) |
+# 修复：将配置中的相对路径（如 .\）解析为绝对路径
+$ConfiguredSafeRoots = @($script:Config.safeRoots | ForEach-Object {
+    $r = $_.Trim()
+    if ([string]::IsNullOrWhiteSpace($r)) { return $null }
+    if (-not [System.IO.Path]::IsPathRooted($r)) {
+        $r = [System.IO.Path]::GetFullPath((Join-Path $script:ScriptDir $r))
+    }
+    return $r
+})
+
+$EssentialSafeRoots = @($EnvSafeRoots) + @($ConfiguredSafeRoots) + @($AutoDetectedSafeRoots) |
                       Where-Object { $_ } | Sort-Object -Unique
 $SafeRoots = @($EssentialSafeRoots) + @($SafeRoots) | Where-Object { $_ } | Sort-Object -Unique
 
@@ -354,6 +524,11 @@ $SafeRoots = @($EssentialSafeRoots) + @($SafeRoots) | Where-Object { $_ } | Sort
 $script:SafeRootList   = @($SafeRoots)
 $script:SystemRootList = @($SystemProtectedRoots)
 $script:ExcludeList    = @($ExcludeRoots)
+
+# 修复：打印最终生效的安全根数量（而非仅配置文件数量）
+Write-Output ('配置就绪: 安全根 {0} 项 / 受保护片段 {1} 项 / 已知垃圾热点 {2} 条 / 近期缓存阈值 {3} 天' -f
+    @($SafeRoots).Count, @($ProtectedRoots).Count,
+    @($script:KnownJunkTargets).Count, $RecentDays)
 
 function Test-SafeRootMatch {
     param([string]$Path)
@@ -425,7 +600,7 @@ function Test-AutoClearExcluded {
 
 # ===================== 方案 C 分类（Cleanable: 是/否/谨慎） =====================
 function Classify-C {
-    param($fi, $Protected)
+    param($fi, $Protected, [switch]$Aggressive)
     $p = $fi.FullName.ToLower()
     $ext = if ($fi.Extension) { $fi.Extension.ToLower() } else { '' }
     $name = $fi.Name.ToLower()
@@ -439,6 +614,46 @@ function Classify-C {
     # 已知垃圾热点优先（微软官方认可可安全清理的标准位置）
     $junk = Test-KnownJunkTarget -LowerPath $p
     if ($junk) { return @{Category = [string]$junk.category; Cleanable = [string]$junk.cleanable; Reason = [string]$junk.reason } }
+
+    # 激进模式：更多系统目录下的缓存/日志/临时文件被分类为可删除
+    if ($Aggressive) {
+        # Windows 系统缓存目录
+        if ($p -match '\\windows\\temp\\' -or $p -match '\\windows\\prefetch\\' -or $p -match '\\windows\\softwaredistribution\\download\\') {
+            return @{Category = '系统缓存'; Cleanable = '是'; Reason = 'Windows 系统缓存(可安全清理)' }
+        }
+        # 传递优化缓存
+        if ($p -match '\\deliveryoptimization\\cache\\') {
+            return @{Category = '传递优化缓存'; Cleanable = '是'; Reason = 'Windows 传递优化(P2P分发)缓存(可安全删除)' }
+        }
+        # Windows 日志和诊断
+        if ($p -match '\\windows\\logs\\' -or $p -match '\\windows\\diagnosis\\' -or $p -match '\\microsoft\\windows\\wer\\') {
+            return @{Category = '系统日志/诊断'; Cleanable = '是'; Reason = 'Windows 日志/诊断数据(可安全清理)' }
+        }
+        # 崩溃转储
+        if ($p -match '\\windows\\minidump\\' -or $p -match '\\memory\.dmp$') {
+            return @{Category = '崩溃转储'; Cleanable = '是'; Reason = '系统崩溃转储(可安全清理)' }
+        }
+        # 缩略图/图标缓存
+        if ($p -match '\\explorer\\thumbcache_' -or $p -match '\\explorer\\iconcache_') {
+            return @{Category = '缩略图/图标缓存'; Cleanable = '是'; Reason = '资源管理器缓存(系统自动重建)' }
+        }
+        # 字体缓存
+        if ($p -match '\\local\\fontcache\\' -or $p -match '\\fonts\\cache\\') {
+            return @{Category = '字体缓存'; Cleanable = '是'; Reason = 'Windows 字体缓存(重启后自动重建)' }
+        }
+        # Windows 更新缓存
+        if ($p -match '\\windows\\winsxs\\backup\\' -or $p -match '\\windows\\winsxs\\manifestcache\\') {
+            return @{Category = 'Windows Update 缓存'; Cleanable = '是'; Reason = 'Windows Update 备份/清单缓存(可安全清理)' }
+        }
+        # CBS 日志
+        if ($p -match '\\logs\\cbs\\') {
+            return @{Category = 'CBS 组件日志'; Cleanable = '是'; Reason = 'Windows 组件基于服务的日志(可安全删除)' }
+        }
+        # 安装缓存
+        if ($p -match '\\windows\\installer\\' -and $ext -in @('.tmp', '.log', '.cab')) {
+            return @{Category = '安装缓存'; Cleanable = '是'; Reason = 'Windows Installer 缓存(可安全清理)' }
+        }
+    }
 
     if ($p -match '\\network\\cookies' -or $p -match '\\cookies$' -or $p -match '\\user data\\default\\bookmarks' -or $p -match 'webview' -or $p -match '\\history$') {
         return @{Category = '浏览数据'; Cleanable = '谨慎'; Reason = '浏览历史/cookie(谨慎清理)' } }
@@ -457,12 +672,17 @@ function Classify-C {
     if ($p -match '\\users\\[^\\]+\\downloads\\') { return @{Category = '下载文件'; Cleanable = '谨慎'; Reason = '下载目录(需用户确认)' } }
     if ($p -match '\\users\\[^\\]+\\(documents|pictures|desktop|videos|music|contacts|links)\\') {
         return @{Category = '用户重要数据'; Cleanable = '否'; Reason = '用户文档/媒体(保留)' } }
+
+    # 激进模式下，未知文件也分类为可删除（而非保守的"否"）
+    if ($Aggressive) {
+        return @{Category = '其他/未知(激进模式)'; Cleanable = '谨慎'; Reason = '未分类文件(激进模式标记为谨慎)' }
+    }
     return @{Category = '其他/未知'; Cleanable = '否'; Reason = '未分类(需人工判断)' }
 }
 
 # ===================== 方案 D 分类（Cleanable: 自动清理/需确认/保留） =====================
 function Classify-D {
-    param($fi, $Protected, $WorkRoot, $RecentDays)
+    param($fi, $Protected, $WorkRoot, $RecentDays, [switch]$Aggressive)
     $p = $fi.FullName.ToLower()
     $ext = if ($fi.Extension) { $fi.Extension.ToLower() } else { '' }
     $name = $fi.Name.ToLower()
@@ -504,6 +724,11 @@ function Classify-D {
     }
     if ($p -match '\\users\\[^\\]+\\(documents|pictures|desktop|videos|music|contacts|links|downloads)\\') {
         return @{Category = '用户重要数据'; Cleanable = '保留'; Reason = '用户文档/媒体(保留)' } }
+
+    # 激进模式下，未知文件标记为需确认（而非保守的保留）
+    if ($Aggressive) {
+        return @{Category = '其他/未知(激进模式)'; Cleanable = '需确认'; Reason = '未分类文件(激进模式标记为需确认)' }
+    }
     return @{Category = '其他/未知'; Cleanable = '保留'; Reason = '未分类(多数保留)' }
 }
 
@@ -559,7 +784,7 @@ function Clear-AutoDirChildren {
 # ===================== 迭代式枚举 + 即时分类写盘 =====================
 # 用显式栈代替递归：彻底规避 PowerShell 脚本递归深度上限（溢出是终止性错误，会中断整轮扫描）
 function Scan-Dir {
-    param($Dir, $Exclude, $Writer, $Scheme, $Protected, $WorkRoot, $RecentDays, $Counter, $MaxDepth)
+    param($Dir, $Exclude, $Writer, $Scheme, $Protected, $WorkRoot, $RecentDays, $Counter, $MaxDepth, [switch]$Aggressive)
 
     $pathStack  = [System.Collections.Generic.Stack[string]]::new()
     $depthStack = [System.Collections.Generic.Stack[int]]::new()
@@ -606,7 +831,7 @@ function Scan-Dir {
                 else {
                     $fi = [System.IO.FileInfo]$e
                     $Counter.Count++
-                    if ($Scheme -eq 'C') { $r = Classify-C $fi $Protected } else { $r = Classify-D $fi $Protected $WorkRoot $RecentDays }
+                    if ($Scheme -eq 'C') { $r = Classify-C $fi $Protected -Aggressive:$Aggressive } else { $r = Classify-D $fi $Protected $WorkRoot $RecentDays -Aggressive:$Aggressive }
                     $sizeMB = Format-SizeMB $fi.Length
                     $lwt = $fi.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
                     $ext = if ($fi.Extension) { $fi.Extension.ToLower() } else { '' }
@@ -766,7 +991,7 @@ if ($Root) {
 
     $counter = @{ Count = 0; Errors = 0; DepthSkipped = 0 }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Scan-Dir $resolved.Path $ExcludeRoots $writer $Scheme $ProtectedRoots $WorkRoot $RecentDays $counter $MaxDepth
+    Scan-Dir $resolved.Path $ExcludeRoots $writer $Scheme $ProtectedRoots $WorkRoot $RecentDays $counter $MaxDepth -Aggressive:$Aggressive
     $sw.Stop()
     $writer.Close()
     Write-Progress -Activity "扫描 $Scheme 方案" -Completed
@@ -1109,24 +1334,221 @@ if ($skippedVcs -gt 0) {
     Write-Output ('版本控制数据保护: {0} 个（.git/.svn/.hg，任何模式下均不删除）' -f $skippedVcs)
 }
 
-# ===================== 执行删除（仅 Execute 模式） =====================
-function Remove-OneItem {
-    param($It)
-    if (-not (Test-Path -LiteralPath $It.Path)) { return 'missing' }
-    $isDir = $false
-    try { $isDir = (Get-Item -LiteralPath $It.Path -ErrorAction Stop) -is [System.IO.DirectoryInfo] }
-    catch { Write-Warning ('无法访问: {0} - {1}' -f $It.Path, $_.Exception.Message); return 'fail' }
+# ===================== 删除辅助函数 =====================
+
+# 管理员权限检测
+function Test-Admin {
+    $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# 构造 \\?\ 长路径前缀，覆盖保留名(nul/con/aux…)/尾点/尾空格/超长路径等病态名
+# 说明：原生 cmdlet 对保留名与超长路径无力；加此前缀后用 .NET 直接操作可删。
+function Format-LongPath {
+    param([string]$Path)
+    if ($Path.StartsWith('\\?\')) { return $Path }
+    if ($Path.StartsWith('\\')) { return '\\?\UNC\' + $Path.TrimStart('\') }
+    if (-not [System.IO.Path]::IsPathRooted($Path)) { $Path = [System.IO.Path]::GetFullPath($Path) }
+    return '\\?\' + $Path
+}
+
+# 反向转换：把 \\?\ 前缀路径还原为普通路径（用于回写注册表 / 用户展示）
+function Convert-LongPathBack {
+    param([string]$LongPath)
+    if ($LongPath.StartsWith('\\?\UNC\')) { return '\\' + $LongPath.Substring(8) }
+    if ($LongPath.StartsWith('\\?\')) { return $LongPath.Substring(4) }
+    return $LongPath
+}
+
+# 危险路径守卫：盘符根（C:\）、UNC 共享根（\\server\share）等卷级/超短路径
+# 必要性（H6）：Format-LongPath('C:\') 得到 '\\?\C:\'，配合递归 Directory.Delete 会清空整个卷；
+# 而三层硬保护（安全根 / 系统核心 / 版本控制）均不匹配裸盘符根，拦不住。此处显式拒绝。
+function Test-DangerousRoot {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $true }
+    $p = $Path.TrimEnd('\', '/')
+    if ($p.Length -le 2) { return $true }                    # 'C:' / '\\' 等
+    if ($p -match '^[A-Za-z]:$') { return $true }             # 盘符
+    if ($p -match '^\\\\[^\\]+$') { return $true }            # \\server
+    if ($p -match '^\\\\[^\\]+\\[^\\]+$') { return $true }    # \\server\share（共享根）
+    return $false
+}
+
+# 已执行过 ACL 修复的路径缓存：避免同一棵子树被反复递归修复（O(N²) 放大）
+$script:AclRepairedPaths = [System.Collections.Generic.List[string]]::new()
+
+function Test-AclAlreadyRepaired {
+    param([string]$Path)
+    foreach ($r in $script:AclRepairedPaths) {
+        if (Test-PathPrefix -Path $Path -Prefix $r) { return $true }
+    }
+    return $false
+}
+
+# ACL 修复：取得所有权 + 授予 Administrators 完全控制
+# 对拒绝访问的路径 best-effort 执行：
+#   1) takeown /F <path> [/R] /D Y /A        —— 将对象所有权交给 Administrators 组
+#   2) icacls <path> /grant *S-1-5-32-544:F [/T] —— 授予 Administrators 完全控制（目录向下继承）
+# 仅目录使用 /R、/T（递归 / 遍历子对象）；对文件使用纯属无效开销，已按 IsDirectory 分流。
+# 系统核心目录下的对象默认不改写（除非 -AllowSystemAclRepair）：改所有权会不可逆地
+# 破坏 Windows 资源保护（WRP）与 TrustedInstaller 语义，且删除失败后无从回滚。
+# 失败仅警告，不中断主流程（best-effort）。
+function Repair-AclForCopy {
+    param([string]$Path, [bool]$IsDirectory = $false)
+
+    # H4 去重：同一路径或已被其祖先修复过的子树，直接跳过重复修复（防 O(N²) 放大）
+    if (Test-AclAlreadyRepaired -Path $Path) { return }
+
+    # 数据安全闸门：系统核心目录下的所有权/ACL 属不可逆改动，默认拒绝
+    if (-not $AllowSystemAclRepair) {
+        try {
+            if (Test-SystemProtected -Path $Path) {
+                Write-Warning ('系统核心目录下跳过 ACL 修复（避免不可逆改动）。如需强制请加 -AllowSystemAclRepair: {0}' -f $Path)
+                return
+            }
+        } catch { }
+    }
+
+    Write-Verbose ('ACL 修复（取得所有权 + 重置）： {0}' -f $Path)
+    if ($IsDirectory) {
+        try {
+            & takeown.exe /F $Path /R /D Y /A 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Warning ('takeown 返回非零退出码 {0}: {1}' -f $LASTEXITCODE, $Path) }
+        } catch { Write-Warning ('takeown 失败: {0} - {1}' -f $Path, $_.Exception.Message) }
+        try {
+            & icacls.exe $Path /grant '*S-1-5-32-544:F' /T 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Warning ('icacls 返回非零退出码 {0}: {1}' -f $LASTEXITCODE, $Path) }
+        } catch { Write-Warning ('icacls 失败: {0} - {1}' -f $Path, $_.Exception.Message) }
+    }
+    else {
+        try {
+            & takeown.exe /F $Path /D Y /A 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Warning ('takeown 返回非零退出码 {0}: {1}' -f $LASTEXITCODE, $Path) }
+        } catch { Write-Warning ('takeown 失败: {0} - {1}' -f $Path, $_.Exception.Message) }
+        try {
+            & icacls.exe $Path /grant '*S-1-5-32-544:F' 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Warning ('icacls 返回非零退出码 {0}: {1}' -f $LASTEXITCODE, $Path) }
+        } catch { Write-Warning ('icacls 失败: {0} - {1}' -f $Path, $_.Exception.Message) }
+    }
+    [void]$script:AclRepairedPaths.Add($Path)
+}
+
+# 展开单个路径为「重启后删除」条目对（source=删除目标, dest=空串）。
+# H5：非空目录须递归展开其下全部后代（先后代、后自身），重启时按序清空；
+#     父路径是子路径的前缀 ⇒ 子路径更长 ⇒ 按路径长度降序排序可保证子项先于父项被处理。
+# M2：UNC 路径用 \??\UNC\ 前缀，否则用 \??\ 前缀（与 Format-LongPath 对齐）。
+function Expand-PendingDelete {
+    param([string]$Path)
+    $lp = Format-LongPath $Path
+    $paths = [System.Collections.Generic.List[string]]::new()
+    if ([System.IO.Directory]::Exists($lp)) {
+        try {
+            $paths.Add($Path)
+            $entries = [System.IO.Directory]::GetFileSystemEntries($lp, '*', [System.IO.SearchOption]::AllDirectories)
+            foreach ($e in $entries) { $paths.Add((Convert-LongPathBack $e)) }
+        }
+        catch { if ($paths.Count -eq 0) { $paths.Add($Path) } }
+    }
+    else {
+        $paths.Add($Path)
+    }
+    $sorted = @($paths | Sort-Object -Property { $_.Length } -Descending)
+    $pairs = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in $sorted) {
+        if ($p.StartsWith('\\')) { $s = '\??\UNC\' + $p.TrimStart('\') }
+        else { $s = '\??\' + $p }
+        $pairs.Add([PSCustomObject]@{ Source = $s; Dest = '' })
+    }
+    return $pairs
+}
+
+# 批量注册重启后删除（PendingFileRenameOperations）。
+# M1：合并所有待删项后**单次**读写注册表，消除逐条登记导致的 O(K²) 放大；
+#     try/finally 保证句柄必关闭（避免异常路径句柄泄漏）。
+function Register-PendingDeleteBatch {
+    param([string[]]$Paths)
+    $keyPath = 'SYSTEM\CurrentControlSet\Control\Session Manager'
+    $valueName = 'PendingFileRenameOperations'
+    $allPairs = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in $Paths) {
+        foreach ($pair in (Expand-PendingDelete -Path $p)) { $allPairs.Add($pair) }
+    }
     try {
-        # 使用底层 .NET API 删除，绕开可能被安全软件 hook 的 Remove-Item cmdlet。
-        # 路径为绝对 LiteralPath，不涉及 PowerShell 通配符，对含 [] {} $ 等特殊字符的路径安全。
-        if ($isDir) { [System.IO.Directory]::Delete($It.Path, $true) }   # 递归删除目录
-        else { [System.IO.File]::Delete($It.Path) }
+        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, $true)
+        if (-not $key) { throw '无法打开注册表键' }
+        try {
+            $existing = @($key.GetValue($valueName, @()))
+            $newList = [System.Collections.Generic.List[string]]::new(@($existing))
+            foreach ($pair in $allPairs) { [void]$newList.Add($pair.Source); [void]$newList.Add($pair.Dest) }
+            $key.SetValue($valueName, @($newList), [Microsoft.Win32.RegistryValueKind]::MultiString)
+            return $allPairs.Count
+        }
+        finally {
+            $key.Close()
+        }
+    }
+    catch {
+        Write-Warning ('批量注册重启删除失败: {0}' -f $_.Exception.Message)
+        return 0
+    }
+}
+
+# ===================== 执行删除（仅 Execute 模式） =====================
+
+function Remove-OneItem {
+    param($It, [switch]$DeleteOnReboot, [switch]$SkipAclRepair)
+
+    # H6 守卫：拒绝盘符根 / UNC 共享根 / 超短路径，避免递归删卷灾难
+    if (Test-DangerousRoot -Path $It.Path) {
+        Write-Warning ('拒绝删除危险路径（守卫拦截）: {0}' -f $It.Path)
+        return 'fail'
+    }
+
+    # M3 前置检查改用长路径前缀（\\?\ 或 \\?\UNC\）：超长路径 / 保留名对象用原生
+    # Test-Path / Get-Item 会误判为不存在而被漏删，必须用与删除同口径的 $lp 判定。
+    $lp = Format-LongPath $It.Path
+    if (-not ([System.IO.File]::Exists($lp) -or [System.IO.Directory]::Exists($lp))) {
+        return 'missing'
+    }
+    $isDir = [System.IO.Directory]::Exists($lp)
+
+    $lastError = $null
+
+    # 尝试 1：直接 .NET 删除（使用 \\?\ 长路径前缀，覆盖保留名/超长路径）
+    try {
+        if ($isDir) { [System.IO.Directory]::Delete($lp, $true) }
+        else { [System.IO.File]::Delete($lp) }
         return 'ok'
     }
     catch {
-        Write-Warning ('删除失败: {0} - {1}' -f $It.Path, $_.Exception.Message)
-        return 'fail'
+        $lastError = $_
+        Write-Verbose ('直接删除失败: {0} - {1}' -f $It.Path, $_.Exception.Message)
     }
+
+    # 尝试 2：ACL 修复后重试（除非 -SkipAclRepair）。Repair-AclForCopy 内部已按
+    # 子树去重（防 O(N²)），并按文件/目录分流（$isDir）。
+    if (-not $SkipAclRepair) {
+        try {
+            Repair-AclForCopy -Path $It.Path -IsDirectory:$isDir
+            if ($isDir) { [System.IO.Directory]::Delete($lp, $true) }
+            else { [System.IO.File]::Delete($lp) }
+            return 'ok'
+        }
+        catch {
+            $lastError = $_
+            Write-Verbose ('ACL 修复后删除仍失败: {0} - {1}' -f $It.Path, $_.Exception.Message)
+        }
+    }
+
+    # 尝试 3：标记重启后删除（实际注册在 Invoke-DeleteBatch 批量完成，单次写注册表）
+    if ($DeleteOnReboot) {
+        return 'reboot'
+    }
+
+    if ($lastError) {
+        Write-Warning ('删除失败: {0} - {1}' -f $It.Path, $lastError.Exception.Message)
+    }
+    return 'fail'
 }
 
 # 目录确认缓存（通过参数传递，避免函数隐式依赖外层变量）
@@ -1143,22 +1565,22 @@ function Confirm-Dir {
 }
 
 function Invoke-DeleteBatch {
-    param($Items, [bool]$RequireDirConfirm, [bool]$WhatIf, [string]$Label)
+    param($Items, [bool]$RequireDirConfirm, [bool]$WhatIf, [string]$Label, [bool]$DeleteOnReboot, [bool]$SkipAclRepair)
 
-    $ok = 0; $fail = 0; $skip = 0
+    $ok = 0; $fail = 0; $skip = 0; $reboot = 0
     # 返回结构化统计对象，而不是「统计数字 + 混杂的日志字符串」。
     # 原因：本函数返回值会被赋值使用（$st = Invoke-DeleteBatch ...），若函数体内直接
     # Write-Output 打日志，日志会串入返回值，使调用方的 $st.Fail 变为数组、判断失真。
     # 日志改由 Messages 收集，交调用方统一输出——输出文案保持不变，返回值保持干净。
     $messages = [System.Collections.Generic.List[string]]::new()
 
+    $pendingPaths = [System.Collections.Generic.List[string]]::new()
     foreach ($it in $Items) {
-        if (-not (Test-Path -LiteralPath $it.Path)) { $skip++; continue }
-        $isDir = $false
-        # TOCTOU 保护：上一步 Test-Path 与此处 Get-Item 之间文件可能已被删除或变为不可访问
-        try { $isDir = (Get-Item -LiteralPath $it.Path -ErrorAction Stop) -is [System.IO.DirectoryInfo] }
-        catch { Write-Warning ('无法访问，已跳过: {0}' -f $it.Path); $skip++; continue }
-
+        # M3：前置存在性检查改用长路径前缀，避免超长路径被误判为缺失而漏删
+        $lp0 = Format-LongPath $it.Path
+        if (-not ([System.IO.File]::Exists($lp0) -or [System.IO.Directory]::Exists($lp0))) { $skip++; continue }
+        $isDir = [System.IO.Directory]::Exists($lp0)
+        # TOCTOU 保护：检查与删除之间文件可能已被删除或变为不可访问
         if ($isDir -and $RequireDirConfirm) {
             # 确认对象必须是目录自身（$it.Path，$isDir 已为真）
             if (-not (Confirm-Dir -Dir $it.Path -WhatIf $WhatIf)) {
@@ -1170,19 +1592,39 @@ function Invoke-DeleteBatch {
             [void]$messages.Add(('WhatIf: 将删除 {0} [{1}]' -f $(if ($isDir) { '目录' } else { '文件' }), $it.Path))
             $ok++; continue
         }
-        $r = Remove-OneItem -It $it
+        $r = Remove-OneItem -It $it -DeleteOnReboot:$DeleteOnReboot -SkipAclRepair:$SkipAclRepair
         switch ($r) {
-            'ok' { $ok++ }
-            'fail' { $fail++ }
+            'ok'    { $ok++ }
+            'reboot' {
+                $reboot++
+                [void]$pendingPaths.Add($it.Path)
+                [void]$messages.Add(('已登记重启删除: {0}' -f $it.Path))
+            }
+            'fail'  { $fail++ }
             'missing' { $skip++ }
         }
     }
+
+    # H5 + M1：循环结束后单次批量注册重启删除（目录递归展开 + 单次写注册表）
+    $rebootRegistered = 0
+    if ($pendingPaths.Count -gt 0) {
+        $rebootRegistered = Register-PendingDeleteBatch -Paths $pendingPaths
+        if ($rebootRegistered -lt $pendingPaths.Count) {
+            [void]$messages.Add(('重启删除注册：成功 {0} / 共 {1} 项（其余可能因权限不足未注册）' -f $rebootRegistered, $pendingPaths.Count))
+        }
+        else {
+            [void]$messages.Add(('重启删除已注册 {0} 项，重启后生效' -f $rebootRegistered))
+        }
+    }
+
     return [PSCustomObject]@{
-        Label    = $Label
-        Ok       = $ok
-        Fail     = $fail
-        Skip     = $skip
-        Messages = $messages
+        Label            = $Label
+        Ok               = $ok
+        Fail             = $fail
+        Skip             = $skip
+        Reboot           = $reboot
+        HasPendingReboot = ($pendingPaths.Count -gt 0)
+        Messages         = $messages
     }
 }
 
@@ -1192,7 +1634,9 @@ function Write-DeleteStat {
     # （$f = Write-DeleteStat ...），若用 Write-Output 会把日志串入返回值，使 $f 变为
     # 数组、if ($f -gt 0) 判定失真（同类 F-B 函数污染缺陷，必须规避）。
     foreach ($m in $Stat.Messages) { Write-Host $m }
-    Write-Host ('{0}: 成功 {1}，失败 {2}，跳过 {3}' -f $Stat.Label, $Stat.Ok, $Stat.Fail, $Stat.Skip)
+    $statLine = '{0}: 成功 {1}，失败 {2}，跳过 {3}' -f $Stat.Label, $Stat.Ok, $Stat.Fail, $Stat.Skip
+    if ($Stat.Reboot -gt 0) { $statLine += ('，已注册重启删除 {0}' -f $Stat.Reboot) }
+    Write-Host $statLine
     return [int]$Stat.Fail
 }
 
@@ -1201,16 +1645,42 @@ if ($Mode -eq 'Execute') {
     Write-Output '===== 进入执行删除模式 ====='
     if ($WhatIf) { Write-Output '（WhatIf 已启用：仅模拟删除，不实际删除任何文件，不弹出交互确认）' }
 
+    # 管理员提权自检：非 WhatIf 的 Execute 模式下，若未以管理员运行则警告
+    # （takeown/icacls 与 PendingFileRenameOperations 均需管理员权限）
+    if (-not $WhatIf) {
+        if (-not (Test-Admin)) {
+            Write-Warning '当前未以管理员身份运行。ACL 修复（takeown/icacls）与重启删除（PendingFileRenameOperations）可能失败。'
+            Write-Warning '建议：右键 PowerShell → 以管理员身份运行，再重新执行本脚本。'
+            # H1：非交互环境（计划任务 / CI / 管道调用）无 stdin，Read-Host 会抛异常并终止脚本。
+            #     此时按设计跳过交互确认、仅告警并继续（部分删除可能失败，属可期行为）。
+            if (-not [Environment]::UserInteractive) {
+                Write-Warning '非交互环境：跳过交互确认，继续（部分删除可能因权限不足失败）。'
+            }
+            else {
+                $cont = Read-Host '是否继续（部分删除可能失败）? (y/N)'
+                # L2：用户取消属独立语义，使用退出码 3（非参数/清单错误码 1）
+                if ($cont -notmatch '^[yY]') { Write-Output '已取消。'; exit 3 }
+            }
+        }
+    }
+
+    $hasReboot = $false
     # 1. 确定拟删除（非安全根、非系统核心）：目录型按目录确认
-    $f = Write-DeleteStat -Stat (Invoke-DeleteBatch -Items $planDelete -RequireDirConfirm $true -WhatIf $WhatIf -Label '自动清理删除')
+    $st = Invoke-DeleteBatch -Items $planDelete -RequireDirConfirm $true -WhatIf $WhatIf -Label '自动清理删除' -DeleteOnReboot:$DeleteOnReboot -SkipAclRepair:$SkipAclRepair
+    $f = Write-DeleteStat -Stat $st
     if ($f -gt 0) { $exitCode = 2 }
+    if ($st.HasPendingReboot) { $hasReboot = $true }
 
     # 2. 需确认项 / 系统核心降级项（仅当显式 -DeleteConfirmed）
     if ($DeleteConfirmed) {
-        $f = Write-DeleteStat -Stat (Invoke-DeleteBatch -Items $planConfirm -RequireDirConfirm $true -WhatIf $WhatIf -Label '需确认项(已授权)删除')
+        $st = Invoke-DeleteBatch -Items $planConfirm -RequireDirConfirm $true -WhatIf $WhatIf -Label '需确认项(已授权)删除' -DeleteOnReboot:$DeleteOnReboot -SkipAclRepair:$SkipAclRepair
+        $f = Write-DeleteStat -Stat $st
         if ($f -gt 0) { $exitCode = 2 }
-        $f = Write-DeleteStat -Stat (Invoke-DeleteBatch -Items $planGuarded -RequireDirConfirm $true -WhatIf $WhatIf -Label '系统核心降级项(已授权)删除')
+        if ($st.HasPendingReboot) { $hasReboot = $true }
+        $st = Invoke-DeleteBatch -Items $planGuarded -RequireDirConfirm $true -WhatIf $WhatIf -Label '系统核心降级项(已授权)删除' -DeleteOnReboot:$DeleteOnReboot -SkipAclRepair:$SkipAclRepair
+        $f = Write-DeleteStat -Stat $st
         if ($f -gt 0) { $exitCode = 2 }
+        if ($st.HasPendingReboot) { $hasReboot = $true }
     }
     else {
         Write-Output ('非安全根需确认项 {0} 个、系统核心降级项 {1} 个默认跳过（未删除）。' -f $planConfirm.Count, $planGuarded.Count)
@@ -1218,9 +1688,14 @@ if ($Mode -eq 'Execute') {
 
     # 3. 安全根项：按目录批量交互确认（始终需显式 y；不静默删）
     if ($planSafe.Count -gt 0) {
-        $f = Write-DeleteStat -Stat (Invoke-DeleteBatch -Items $planSafe -RequireDirConfirm $true -WhatIf $WhatIf -Label '安全根目录删除')
+        $st = Invoke-DeleteBatch -Items $planSafe -RequireDirConfirm $true -WhatIf $WhatIf -Label '安全根目录删除' -DeleteOnReboot:$DeleteOnReboot -SkipAclRepair:$SkipAclRepair
+        $f = Write-DeleteStat -Stat $st
         if ($f -gt 0) { $exitCode = 2 }
+        if ($st.HasPendingReboot) { $hasReboot = $true }
     }
+
+    # L1：存在已注册、需重启后删除的项，且无非删除失败项时，退出码置 4（提示用户重启生效）
+    if ($hasReboot -and $exitCode -ne 2) { $exitCode = 4 }
 }
 else {
     Write-Output '===== DryRun 模式：未删除任何文件 ====='

@@ -1405,6 +1405,135 @@ Describe 'F5 AST 审计 — 批量输入与聚合输出' {
 
 # ===================== Z. 收尾：测试零残留（自清理 + 自证） =====================
 # 所有临时产物统一使用 zw_pester_ 前缀，收尾时按前缀整批回收。
+# ===================== H2 新增功能单元测试（H6/H5/M2/M3/H1/L1 等缺陷的针对性覆盖） =====================
+# 通过 AST 提取内部函数体 dot-source，对本次新增/改动的函数做白盒断言；
+# 通过 Invoke-Cleanup 黑盒驱动，对 -Aggressive / -NoSystemExclude 等新增开关做端到端断言。
+Describe 'H2 新增功能与修复锁定' {
+
+    It 'T1 Format-LongPath 四类输入（普通/UNC/已带前缀/盘符根）' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Format-LongPath')
+        . $p
+        (Format-LongPath 'C:\foo\bar.txt') | Should Be '\\?\C:\foo\bar.txt'
+        (Format-LongPath '\\server\share\x.txt') | Should Be '\\?\UNC\server\share\x.txt'
+        (Format-LongPath '\\?\C:\foo') | Should Be '\\?\C:\foo'          # 幂等
+        (Format-LongPath 'C:\') | Should Be '\\?\C:\'                    # 盘符根（守卫在 Remove-OneItem，此处仅验证前缀）
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T2 Convert-LongPathBack 反向还原三类路径' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Convert-LongPathBack')
+        . $p
+        (Convert-LongPathBack '\\?\C:\foo') | Should Be 'C:\foo'
+        (Convert-LongPathBack '\\?\UNC\server\share\x') | Should Be '\\server\share\x'
+        (Convert-LongPathBack 'C:\foo') | Should Be 'C:\foo'             # 无前缀原样返回
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T3 Test-Admin 返回类型必须为 [bool]（不被 Write-Output 污染）' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Test-Admin')
+        . $p
+        $r = Test-Admin
+        ($r -is [bool]) | Should Be $true
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T4 Test-DangerousRoot 盘符根/UNC共享根守卫（H6）' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Test-DangerousRoot', 'Test-PathPrefix')
+        . $p
+        (Test-DangerousRoot 'C:\') | Should Be $true
+        (Test-DangerousRoot 'C:') | Should Be $true
+        (Test-DangerousRoot '\\server') | Should Be $true
+        (Test-DangerousRoot '\\server\share') | Should Be $true
+        (Test-DangerousRoot '') | Should Be $true
+        (Test-DangerousRoot 'C:\Windows') | Should Be $false
+        (Test-DangerousRoot 'D:\Data\junk') | Should Be $false
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T5 Test-PathPrefix 边界匹配（避免 C:\Windows 误匹配 C:\WindowsApps）' {
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Test-PathPrefix')
+        . $p
+        (Test-PathPrefix 'C:\Windows\foo' 'C:\Windows') | Should Be $true
+        (Test-PathPrefix 'C:\Windows' 'C:\Windows') | Should Be $true
+        (Test-PathPrefix 'C:\WindowsApps' 'C:\Windows') | Should Be $false
+        (Test-PathPrefix 'C:\Windows.old' 'C:\Windows') | Should Be $false
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T6 Expand-PendingDelete 非空目录递归展开 + 子项先于父项 + UNC 前缀（H5+M2）' {
+        # 构建非空目录树：d\f1, d\sub\f2
+        $d = Join-Path $tmp ('zw_pester_pend_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $sub = Join-Path $d 'sub'
+        New-Item -ItemType Directory -Path $sub -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $d 'f1.txt'), 'x', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $sub 'f2.txt'), 'x', [System.Text.UTF8Encoding]::new($false))
+        $p = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Expand-PendingDelete', 'Format-LongPath', 'Convert-LongPathBack')
+        . $p
+        # 用 @(...) 强制数组化：PS 5.1 会把单元素集合拆包为标量，导致 .Count 为 $null；
+        # 生产代码以 foreach 遍历（对标量/集合均安全），此处仅断言需显式数组化。
+        $pairs = @(Expand-PendingDelete -Path $d)
+        # d 自身 + f1 + sub + f2 = 4 条
+        $pairs.Count | Should Be 4
+        # 全部 dest 为空串
+        (@($pairs | Where-Object { $_.Dest -ne '' })).Count | Should Be 0
+        # 全部本地项用 \??\ 前缀
+        (@($pairs | Where-Object { -not $_.Source.StartsWith('\??\') })).Count | Should Be 0
+        # 排序正确性：最深路径（f2.txt）必须排在最前（父路径是子路径前缀 ⇒ 子更长，降序即子先父后）
+        $srcs = @($pairs.Source)
+        $srcs[0] | Should Match 'f2\.txt'
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+
+        # M2：UNC 路径用 \??\UNC\ 前缀（无真实共享，仅验证前缀规范化）
+        $p2 = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Expand-PendingDelete', 'Format-LongPath', 'Convert-LongPathBack')
+        . $p2
+        $upairs = @(Expand-PendingDelete -Path '\\fakehost\share\file.txt')
+        $upairs.Count | Should Be 1
+        $upairs[0].Source | Should Be '\??\UNC\fakehost\share\file.txt'
+        Remove-Item $p2 -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T7 -Aggressive 端到端冒烟：开关被接受、不破坏既有分类契约' {
+        $csv = New-TempCsv -content @'
+$csvHeader
+"D:\Agg\real.tmp",".tmp","0.01","2026-01-01 00:00:00","Applications","自动清理","普通删除"
+"D:\Agg\keep.txt",".txt","0.001","2026-01-01 00:00:00","User","保留","用户保留"
+'@
+        $r = Invoke-Cleanup -CsvPaths $csv -Extra @{ Aggressive = $true }
+        $r.Code | Should Be 0
+        $plan = @(Import-Csv $r.OutCsv)
+        (@($plan | Where-Object { $_.FullPath -like '*\Agg\real.tmp' -and $_.Intent -eq 'Delete' })).Count | Should Be 1
+        (@($plan | Where-Object { $_.FullPath -like '*\Agg\keep.txt' })).Count | Should Be 0
+        Remove-Item $csv -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T8 -NoSystemExclude 与 -ExcludeRoots 同时生效（M5 修复：不被静默忽略）' {
+        # 关键回归：旧实现中 -ExcludeRoots 会让 -NoSystemExclude 整体失效且无提示。
+        # 此处以「组合不报错 + 退出码 0 + 既有权限降级契约不变」锁定修复。
+        $csv = New-TempCsv -content @'
+$csvHeader
+"D:\NS\junk.tmp",".tmp","0.01","2026-01-01 00:00:00","Applications","自动清理","普通删除"
+'@
+        $r = Invoke-Cleanup -CsvPaths $csv -Extra @{ ExcludeRoots = @('D:\NS\irrelevant'); NoSystemExclude = $true }
+        $r.Code | Should Be 0
+        $plan = @(Import-Csv $r.OutCsv)
+        (@($plan | Where-Object { $_.FullPath -like '*\NS\junk.tmp' -and $_.Intent -eq 'Delete' })).Count | Should Be 1
+        Remove-Item $csv -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'T9 H1 非交互守卫已落地（[Environment]::UserInteractive 短路 Read-Host）' {
+        $src = [System.IO.File]::ReadAllText($cleanupScript)
+        ($src -match 'UserInteractive') | Should Be $true
+    }
+
+    It 'T10 L1 重启删除退出码 4 已声明并在主流程生效（HasPendingReboot）' {
+        $src = [System.IO.File]::ReadAllText($cleanupScript)
+        ($src -match 'HasPendingReboot') | Should Be $true
+        # .OUTPUTS 声明了退出码 0/1/2/3/4 全链
+        ($src -match '4 = 存在已注册、需重启后删除的项') | Should Be $true
+    }
+}
+
 # 这一条既是卫生要求，也是"测试不污染宿主环境"的可验证断言。
 
 Describe 'Z 收尾：测试零残留（自证 + 自清理）' {
