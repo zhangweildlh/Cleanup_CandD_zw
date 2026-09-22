@@ -34,6 +34,18 @@ $auditScript = Join-Path $here 'tools\Invoke-PSAstAudit.ps1'
 # 与 winapp2_expand.ps1 内部展开 %Temp% 的来源保持一致，避免探测文件错位。
 $tmp = [System.IO.Path]::GetTempPath()
 
+# 密封扫描根基（-Root 现场扫描专用）：必须同时规避产品的两处「路径内容」陷阱：
+#   陷阱1（AppData 误判）：cleanup_cd.ps1 的 Classify-AppData 把路径中「appdata\local\」之后的
+#     第一段当作 AppData 应用段；CI 的 $env:TEMP 为 C:\Users\runneradmin\AppData\Local\Temp，
+#     若扫描根落入其中，全部文件被误判为"系统/内置 AppData -> 保留" -> 规划项归零 -> exit 1。
+#   陷阱2（AI_Work_Temp 整树例外）：产品对任意祖先目录名为 AI_Work_Temp 的整棵树做"保留"例外；
+#     本仓库在本机位于 D:\Documents\AI_Work_Temp\ 之下，若扫描根放在仓库内，整树判保留 -> exit 1。
+# 因此扫描基目录必须既不在 appdata\local\ 之下、也不在 AI_Work_Temp 之下。
+# 选用 $env:USERPROFILE 下的专用子目录：本机为 C:\Users\15794\zw_pester_scanroots，
+# CI 为 C:\Users\runneradmin\zw_pester_scanroots，两者均规避上述两陷阱，且与仓库位置解耦。
+$scanBase = Join-Path $env:USERPROFILE 'zw_pester_scanroots'
+if (-not (Test-Path -LiteralPath $scanBase)) { New-Item -ItemType Directory -Path $scanBase -Force | Out-Null }
+
 # ===================== 公共辅助 =====================
 
 # 准备探测文件（让 DetectFile 通过，使条目被判定为"已装"而产出处置行）
@@ -828,7 +840,7 @@ $csvHeader
 Describe 'C6 cleanup_cd — 现场扫描（-Root，Scheme D 分类）' {
 
     It '普通目录：.tmp/.log->Delete，普通 .txt->Keep(保留跳过)' {
-        $scanRoot = Join-Path $tmp ('zw_pester_scan_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $scanRoot = Join-Path $scanBase ('zw_pester_scan_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $scanRoot -Force | Out-Null
         # 写入内容避免被当作 0 字节空文件（空文件分类为 Confirm 而非 Delete）
         $junkTmp = Join-Path $scanRoot 'junk.tmp'
@@ -851,7 +863,7 @@ Describe 'C6 cleanup_cd — 现场扫描（-Root，Scheme D 分类）' {
     }
 
     It 'DryRun 现场扫描零副作用：目标文件在扫描前后均存在且内容不变' {
-        $scanRoot = Join-Path $tmp ('zw_pester_side_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $scanRoot = Join-Path $scanBase ('zw_pester_side_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $scanRoot -Force | Out-Null
         $f = Join-Path $scanRoot 'payload.tmp'
         [System.IO.File]::WriteAllText($f, 'SENTINEL-PAYLOAD', [System.Text.UTF8Encoding]::new($false))
@@ -865,7 +877,7 @@ Describe 'C6 cleanup_cd — 现场扫描（-Root，Scheme D 分类）' {
     }
 
     It '临时目录(temp)：其下 .tmp/.log/普通.txt 一律 Delete(自动清理，需清空)' {
-        $scanRoot = Join-Path $tmp ('zw_pester_temp_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $scanRoot = Join-Path $scanBase ('zw_pester_temp_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $scanRoot -Force | Out-Null
         New-Item -ItemType File -Path (Join-Path $scanRoot 'a.tmp') -Force | Out-Null
         New-Item -ItemType File -Path (Join-Path $scanRoot 'b.log') -Force | Out-Null
@@ -881,7 +893,7 @@ Describe 'C6 cleanup_cd — 现场扫描（-Root，Scheme D 分类）' {
 Describe 'C7 cleanup_cd — 自动清理目录（清空内容，保留壳）v0.5.0' {
 
     It '规则1(名恰为 temp/cache/.tmp/.cache)：其下直接子项全删、目录自身不进计划' {
-        $autoRoot = Join-Path $tmp ('zw_pester_auto1_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $autoRoot = Join-Path $scanBase ('zw_pester_auto1_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $autoDir = Join-Path $autoRoot 'temp'
         New-Item -ItemType Directory -Path $autoDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $autoDir 'sub') -Force | Out-Null
@@ -899,7 +911,7 @@ Describe 'C7 cleanup_cd — 自动清理目录（清空内容，保留壳）v0.5
     }
 
     It '规则2(AI_Work_Temp 整树例外)：其内部 temp 子目录内容不进计划，同级普通 temp 仍清空' {
-        $root = Join-Path $tmp ('zw_pester_auto2_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $root = Join-Path $scanBase ('zw_pester_auto2_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $aiDir = Join-Path $root 'AI_Work_Temp'
         $aiTemp = Join-Path $aiDir 'temp'
         $plainTemp = Join-Path $root 'temp'
@@ -1231,7 +1243,7 @@ Describe 'F2 cleanup_cd — 编码回退与 CSV 解析边界（RFC4180）' {
 Describe 'F3 cleanup_cd — 扫描深度边界与受保护片段（扫描模式）' {
 
     It '-MaxDepth 1：更深层目录被跳过，仅顶层文件入计划' {
-        $root = Join-Path $tmp ('zw_pester_depth_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $root = Join-Path $scanBase ('zw_pester_depth_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $lvl1 = Join-Path $root 'lvl1'
         $lvl2 = Join-Path $lvl1 'lvl2'
         New-Item -ItemType Directory -Path $lvl2 -Force | Out-Null
@@ -1248,7 +1260,7 @@ Describe 'F3 cleanup_cd — 扫描深度边界与受保护片段（扫描模式�
     }
 
     It '受保护片段（.workbuddy）目录下的文件在扫描模式被判保留，不进计划' {
-        $root = Join-Path $tmp ('zw_pester_prot_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $root = Join-Path $scanBase ('zw_pester_prot_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $pb = Join-Path $root '.workbuddy'
         New-Item -ItemType Directory -Path $pb -Force | Out-Null
         $inside = Join-Path $pb 'memory.tmp'
@@ -1630,7 +1642,7 @@ $script:SystemAppDataDirs = @('microsoft','windows','classes','packages','temp',
 Describe 'H3b AppData 条件保留 — 黑盒集成（-Root 现场扫描）' {
 
     It 'T18 -Root 扫描 AppData 树：字体/系统内置->保留、孤儿->需确认（配置驱动，确定性）' {
-        $scanRoot = Join-Path $tmp ('zw_pester_appdata_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $scanRoot = Join-Path $scanBase ('zw_pester_appdata_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $fontDir = Join-Path $scanRoot 'AppData\Local\Microsoft\Windows\Fonts'
         $sysDir = Join-Path $scanRoot 'AppData\Roaming\Microsoft\Edge'
         $orphanDir = Join-Path $scanRoot 'AppData\Local\GhostAppXYZ'
@@ -1658,7 +1670,7 @@ Describe 'H3b AppData 条件保留 — 黑盒集成（-Root 现场扫描）' {
 Describe 'Z 收尾：测试零残留（自证 + 自清理）' {
 
     It '-Root 扫描产物落在 zw_pester_ 前缀路径（不写默认名 scan_inventory_*）' {
-        $root = Join-Path $tmp ('zw_pester_scanout_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $root = Join-Path $scanBase ('zw_pester_scanout_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $root -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $root 'a.tmp'), 'x', [System.Text.UTF8Encoding]::new($false))
         $r = Invoke-Cleanup -CsvPaths @() -Scheme D -Mode DryRun -Extra @{ Root = $root }
