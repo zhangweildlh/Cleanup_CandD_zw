@@ -956,7 +956,12 @@ $csvHeader
     It '未提供 -Root 与 -CsvPaths：exit 1（参数错误）' {
         $outMd = Join-Path $tmp ('zw_pester_noinput_' + [guid]::NewGuid().ToString('N') + '.md')
         $outCsv = Join-Path $tmp ('zw_pester_noinput_' + [guid]::NewGuid().ToString('N') + '_files.csv')
-        $output = & $cleanupScript -OutMd $outMd -OutCsv $outCsv
+        # 业务脚本对"无 -Root/-CsvPaths"走 Write-Error + exit 1（预期错误路径）。
+        # 运行器顶层 $ErrorActionPreference='Stop' 会将该 Write-Error 提升为终止错误而中断整套件，
+        # 故此处临时降级为 Continue，使脚本能落到 exit 1、$LASTEXITCODE 取到 1，断言方可成立。
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $output = & $cleanupScript -OutMd $outMd -OutCsv $outCsv } finally { $ErrorActionPreference = $prevEap }
         $code = $LASTEXITCODE
         $code | Should Be 1
         Remove-Item $outMd -Force -ErrorAction SilentlyContinue
@@ -1531,6 +1536,120 @@ $csvHeader
         ($src -match 'HasPendingReboot') | Should Be $true
         # .OUTPUTS 声明了退出码 0/1/2/3/4 全链
         ($src -match '4 = 存在已注册、需重启后删除的项') | Should Be $true
+    }
+}
+
+# ===================== H3 AppData 条件保留（规则#2/#3/#4）逻辑锁定 =====================
+# 白盒：AST 提取 Normalize-SoftwareToken / Test-InstalledSoftwareMatch / Classify-AppData
+# 到同一临时 .ps1，并注入确定性 $script: 状态（函数体与赋值同文件，$script: 解析到同一
+# 文件作用域，一致），对三级覆盖、字体/系统/已装/孤儿判定做断言。
+# 黑盒：合成 AppData 树走真实 -Root 扫描，断言扫描表 OutScanCsv 的 Cleanable 列
+# （字体/系统内置->保留，孤儿->需确认；配置驱动，不依赖本机真实软件清单，确定性）。
+
+Describe 'H3 AppData 条件保留 — 白盒逻辑锁定' {
+
+    $astFile = Export-InternalFunction -ScriptPath $cleanupScript -FunctionName @('Normalize-SoftwareToken', 'Test-InstalledSoftwareMatch', 'Classify-AppData')
+    # 注入确定性 $script: 状态：函数体与赋值同文件，$script: 解析一致
+    $inject = @'
+$script:InstalledTokens = @('everything','potplayer','thunder','wpsoffice','directoryopus','360chrome','kingsoft','ticktick','wps','nvidia','vmware','opera','doubaoime','sogouexplorer','2345pic','adobe')
+$script:AppDataAliases = @(
+  @{ appDataDir='GPSoftware'; software='Directory Opus' },
+  @{ appDataDir='360Se6'; software='360Chrome' },
+  @{ appDataDir='thunder'; software='Thunder' },
+  @{ appDataDir='kingsoft'; software='WPS' },
+  @{ appDataDir='Tick_Tick'; software='TickTick' },
+  @{ appDataDir='Daum'; software='PotPlayer' },
+  @{ appDataDir='WXWorkLocal'; software='WXWork' },
+  @{ appDataDir='Opera'; software='Opera' },
+  @{ appDataDir='NVIDIA'; software='NVIDIA' },
+  @{ appDataDir='VMware'; software='VMware' }
+)
+$script:SystemAppDataDirs = @('microsoft','windows','classes','packages','temp','amd','nvidia','intel','ati','google','mozilla','apple','java','python','nodejs','skype','adobe','oracle')
+'@
+    Add-Content -Path $astFile -Value $inject -Encoding ascii
+    . $astFile
+
+    It 'T11 Normalize-SoftwareToken：去非字母数字 + 转小写 + 空值返回空串' {
+        (Normalize-SoftwareToken 'WPS Office') | Should Be 'wpsoffice'
+        (Normalize-SoftwareToken '360Chrome') | Should Be '360chrome'
+        (Normalize-SoftwareToken '') | Should Be ''
+        (Normalize-SoftwareToken $null) | Should Be ''
+    }
+
+    It 'T12 Test-InstalledSoftwareMatch：精确 / 双向子串 / 显式别名命中 + 孤儿返回 $null' {
+        (Test-InstalledSoftwareMatch -AppSeg 'kingsoft') | Should Be 'WPS'          # 别名 kingsoft->WPS，命中已装 token wps
+        (Test-InstalledSoftwareMatch -AppSeg 'thunder') | Should Be 'Thunder'       # 别名 thunder->Thunder
+        (Test-InstalledSoftwareMatch -AppSeg 'potplayer') | Should Be 'potplayer'   # 精确 token
+        (Test-InstalledSoftwareMatch -AppSeg 'WPSoffice') | Should Be 'wpsoffice'   # 精确（大小写归一）
+        (Test-InstalledSoftwareMatch -AppSeg '360Se6') | Should Be '360Chrome'       # 别名 360Se6->360Chrome
+        ($null -eq (Test-InstalledSoftwareMatch -AppSeg 'Microsoft')) | Should Be $true   # 未装、无别名 -> 孤儿
+        ($null -eq (Test-InstalledSoftwareMatch -AppSeg 'GhostAppXYZ')) | Should Be $true # 孤儿
+    }
+
+    It 'T13 Classify-AppData 规则#2：用户字体目录一律保留（C/D 双方案）' {
+        $rC = Classify-AppData -Path 'C:\Users\X\AppData\Local\Microsoft\Windows\Fonts\a.ttf' -Scheme 'C'
+        $rC.Cleanable | Should Be '否'
+        $rC.Category | Should Be '用户字体'
+        $rD = Classify-AppData -Path 'C:\Users\X\AppData\Local\Microsoft\Windows\Fonts\sub\b.ttf' -Scheme 'D'
+        $rD.Cleanable | Should Be '保留'
+    }
+
+    It 'T14 Classify-AppData：系统/内置子目录保留（判定先于软件匹配）' {
+        $r = Classify-AppData -Path 'C:\Users\X\AppData\Roaming\Microsoft\Edge\a.txt' -Scheme 'D'
+        $r.Cleanable | Should Be '保留'
+        $r.Category | Should Be '系统/内置 AppData'
+        $r2 = Classify-AppData -Path 'C:\Users\X\AppData\Local\nvidia\drv\a.sys' -Scheme 'C'
+        $r2.Cleanable | Should Be '否'
+    }
+
+    It 'T15 Classify-AppData：已装/绿色部署软件数据保留（规则#3/#4）' {
+        $r = Classify-AppData -Path 'C:\Users\X\AppData\Roaming\kingsoft\cfg\a.txt' -Scheme 'D'
+        $r.Cleanable | Should Be '保留'
+        ($r.Reason -match 'WPS') | Should Be $true
+        $r2 = Classify-AppData -Path 'C:\Users\X\AppData\Roaming\Tick_Tick\b.json' -Scheme 'C'
+        $r2.Cleanable | Should Be '否'
+        ($r2.Reason -match 'TickTick') | Should Be $true
+    }
+
+    It 'T16 Classify-AppData：孤儿（未匹配）保守标记需确认/谨慎' {
+        $rC = Classify-AppData -Path 'C:\Users\X\AppData\Local\GhostAppXYZ\a.txt' -Scheme 'C'
+        $rC.Cleanable | Should Be '谨慎'
+        ($rC.Reason -match 'GhostAppXYZ') | Should Be $true
+        $rD = Classify-AppData -Path 'C:\Users\X\AppData\Roaming\ZombieSoft\a.txt' -Scheme 'D'
+        $rD.Cleanable | Should Be '需确认'
+    }
+
+    It 'T17 Classify-AppData：非 AppData 路径返回 $null（不拦截其他分类）' {
+        ($null -eq (Classify-AppData -Path 'C:\Users\X\Documents\a.txt' -Scheme 'C')) | Should Be $true
+        ($null -eq (Classify-AppData -Path 'D:\Data\junk.tmp' -Scheme 'D')) | Should Be $true
+    }
+
+    Remove-Item $astFile -Force -ErrorAction SilentlyContinue
+}
+
+Describe 'H3b AppData 条件保留 — 黑盒集成（-Root 现场扫描）' {
+
+    It 'T18 -Root 扫描 AppData 树：字体/系统内置->保留、孤儿->需确认（配置驱动，确定性）' {
+        $scanRoot = Join-Path $tmp ('zw_pester_appdata_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $fontDir = Join-Path $scanRoot 'AppData\Local\Microsoft\Windows\Fonts'
+        $sysDir = Join-Path $scanRoot 'AppData\Roaming\Microsoft\Edge'
+        $orphanDir = Join-Path $scanRoot 'AppData\Local\GhostAppXYZ'
+        New-Item -ItemType Directory -Path $fontDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $sysDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $orphanDir -Force | Out-Null
+        $fFont = Join-Path $fontDir 'a.ttf'
+        $fSys = Join-Path $sysDir 'b.txt'
+        $fOrphan = Join-Path $orphanDir 'c.txt'
+        [System.IO.File]::WriteAllText($fFont, 'f', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($fSys, 's', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($fOrphan, 'o', [System.Text.UTF8Encoding]::new($false))
+        $r = Invoke-Cleanup -CsvPaths @() -Scheme D -Mode DryRun -Extra @{ Root = $scanRoot }
+        $r.Code | Should Be 0
+        $scan = @(Import-Csv $r.OutScanCsv)
+        (@($scan | Where-Object { $_.FullPath -like '*\Fonts\a.ttf' -and $_.Cleanable -eq '保留' })).Count | Should Be 1
+        (@($scan | Where-Object { $_.FullPath -like '*\Microsoft\Edge\b.txt' -and $_.Cleanable -eq '保留' })).Count | Should Be 1
+        (@($scan | Where-Object { $_.FullPath -like '*\GhostAppXYZ\c.txt' -and $_.Cleanable -eq '需确认' })).Count | Should Be 1
+        Remove-Item $scanRoot -Force -Recurse -ErrorAction SilentlyContinue
     }
 }
 

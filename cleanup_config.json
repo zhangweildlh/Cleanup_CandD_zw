@@ -168,5 +168,37 @@
       "source": "dev.to 清理指南",
       "serviceStop": ""
     }
+  ],
+
+  "_appData条件保留": "规则#3/#4：扫描 AppData(Local/LocalLow/Roaming) 子目录时，动态核查本机已装/绿色部署软件（注册表 Uninstall 三处 + Program Files/(x86) + D:\\Tools + D:\\Tools\\Assembly），匹配则保留其 AppData 数据，避免误删致软件无法运行/登录/配置丢失；未匹配者(疑似卸载残留)保守标记需确认。",
+  "installedSoftwareScan": {
+    "enabled": true,
+    "includeToolsDirs": [ "D:\\Tools", "D:\\Tools\\Assembly" ],
+    "programFiles": true,
+    "registry": true
+  },
+
+  "appDataAliases": [
+    { "appDataDir": "GPSoftware", "software": "Directory Opus" },
+    { "appDataDir": "360Se6", "software": "360Chrome" },
+    { "appDataDir": "360aibrowser", "software": "360Chrome" },
+    { "appDataDir": "360zip", "software": "360Zip" },
+    { "appDataDir": "thunder", "software": "Thunder" },
+    { "appDataDir": "kingsoft", "software": "WPS" },
+    { "appDataDir": "Tick_Tick", "software": "TickTick" },
+    { "appDataDir": "Daum", "software": "PotPlayer" },
+    { "appDataDir": "SogouExplorer", "software": "SogouExplorer" },
+    { "appDataDir": "2345Pic", "software": "2345Pic" },
+    { "appDataDir": "DoubaoIme", "software": "DoubaoIme" },
+    { "appDataDir": "WXWorkLocal", "software": "WXWork" },
+    { "appDataDir": "Opera", "software": "Opera" },
+    { "appDataDir": "NVIDIA", "software": "NVIDIA" },
+    { "appDataDir": "VMware", "software": "VMware" }
+  ],
+
+  "systemAppDataDirs": [
+    "microsoft", "windows", "classes", "packages", "temp",
+    "amd", "nvidia", "intel", "ati", "google", "mozilla", "apple",
+    "java", "python", "nodejs", "skype", "adobe", "oracle"
   ]
 }

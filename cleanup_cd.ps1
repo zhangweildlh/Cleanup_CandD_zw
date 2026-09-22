@@ -530,6 +530,82 @@ Write-Output ('配置就绪: 安全根 {0} 项 / 受保护片段 {1} 项 / 已�
     @($SafeRoots).Count, @($ProtectedRoots).Count,
     @($script:KnownJunkTargets).Count, $RecentDays)
 
+# ===================== AppData 条件保留：动态已装软件清单 =====================
+# 规则#3/#4：扫描 AppData(Local/LocalLow/Roaming) 子目录时，动态核查本机已装/绿色部署软件，
+# 匹配则保留其 AppData 数据，避免误删致软件无法运行/登录/配置丢失。
+$script:InstalledScanToolsDirs = @()
+if ($script:Config.installedSoftwareScan -and $script:Config.installedSoftwareScan.includeToolsDirs) {
+    $script:InstalledScanToolsDirs = @($script:Config.installedSoftwareScan.includeToolsDirs | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+$script:AppDataAliases = @()
+if ($script:Config.appDataAliases) { $script:AppDataAliases = @($script:Config.appDataAliases) }
+$script:SystemAppDataDirs = @('microsoft', 'windows', 'classes', 'packages', 'temp', 'amd', 'nvidia', 'intel', 'ati', 'google', 'mozilla', 'apple', 'java', 'python', 'nodejs', 'skype', 'adobe', 'oracle')
+if ($script:Config.systemAppDataDirs) { $script:SystemAppDataDirs = @($script:Config.systemAppDataDirs | ForEach-Object { $_.ToLower() } | Where-Object { $_ }) }
+
+# 归一化 token 助手（去非字母数字、转小写）
+function Normalize-SoftwareToken {
+    param([string]$Raw)
+    if (-not $Raw) { return '' }
+    return [System.Text.RegularExpressions.Regex]::Replace($Raw.ToLower(), '[^a-z0-9]', '')
+}
+
+# 构建已装软件 token 集合（注册表 Uninstall 三处 + Program Files/(x86) + D:\Tools + D:\Tools\Assembly）
+function Get-InstalledInventory {
+    $tokens = New-Object System.Collections.Generic.List[string]
+    $uninstallPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($up in $uninstallPaths) {
+        try {
+            Get-ItemProperty -Path $up -ErrorAction SilentlyContinue | ForEach-Object {
+                $dn = Normalize-SoftwareToken $_.DisplayName
+                if ($dn -and $dn.Length -ge 3 -and -not $tokens.Contains($dn)) { [void]$tokens.Add($dn) }
+                $pb = Normalize-SoftwareToken $_.Publisher
+                if ($pb -and $pb.Length -ge 3 -and -not $tokens.Contains($pb)) { [void]$tokens.Add($pb) }
+            }
+        } catch { }
+    }
+    foreach ($pf in (Get-ProgramFilesPaths)) {
+        if (Test-Path -LiteralPath $pf) {
+            try { Get-ChildItem -LiteralPath $pf -Directory -ErrorAction SilentlyContinue | ForEach-Object { $nm = Normalize-SoftwareToken $_.Name; if ($nm -and $nm.Length -ge 3 -and -not $tokens.Contains($nm)) { [void]$tokens.Add($nm) } } } catch { }
+        }
+    }
+    foreach ($td in $script:InstalledScanToolsDirs) {
+        if (Test-Path -LiteralPath $td) {
+            try { Get-ChildItem -LiteralPath $td -Directory -ErrorAction SilentlyContinue | ForEach-Object { $nm = Normalize-SoftwareToken $_.Name; if ($nm -and $nm.Length -ge 3 -and -not $tokens.Contains($nm)) { [void]$tokens.Add($nm) } } } catch { }
+        }
+    }
+    return $tokens
+}
+
+# 匹配 AppData 子目录名与已装软件 token（精确 / 双向子串(>=3) / 显式别名）
+function Test-InstalledSoftwareMatch {
+    param([string]$AppSeg)
+    $n = Normalize-SoftwareToken $AppSeg
+    if (-not $n) { return $null }
+    foreach ($a in $script:AppDataAliases) {
+        if ($n -eq (Normalize-SoftwareToken $a.appDataDir)) {
+            $tok = Normalize-SoftwareToken $a.software
+            if ($tok) {
+                foreach ($t in $script:InstalledTokens) {
+                    if ($t -eq $tok -or ($tok.Length -ge 3 -and ($t.Contains($tok) -or $tok.Contains($t)))) { return [string]$a.software }
+                }
+            }
+        }
+    }
+    foreach ($t in $script:InstalledTokens) {
+        if ($t -eq $n) { return $t }
+        if ($t.Length -ge 3 -and ($n.Contains($t) -or $t.Contains($n))) { return $t }
+    }
+    return $null
+}
+
+# 构建并缓存清单（脚本级单次；置于顶层而非函数内，避免 D 项噪声）
+$script:InstalledTokens = Get-InstalledInventory
+Write-Verbose ('AppData 条件保留：已装软件 token {0} 个' -f @($script:InstalledTokens).Count)
+
 function Test-SafeRootMatch {
     param([string]$Path)
     foreach ($r in $script:SafeRootList) { if (Test-PathPrefix -Path $Path -Prefix $r) { return $r } }
@@ -666,9 +742,9 @@ function Classify-C {
     if ((@($script:TempExtensions) -contains $ext) -or ($p -match '\\_cacache\\tmp')) {
         return @{Category = '临时文件'; Cleanable = '是'; Reason = '临时扩展名/临时或缓存目录(可清空)' } }
     foreach ($frag in $script:CacheDirFragments) { if ($p.Contains($frag)) { return @{Category = '缓存文件'; Cleanable = '是'; Reason = '缓存目录/浏览器缓存' } } }
-    if ($p -match '\\users\\[^\\]+\\appdata\\roaming' -and $ext -in @('.json', '.ini', '.cfg', '.config', '.xml', '.setting')) {
-        return @{Category = '应用配置'; Cleanable = '否'; Reason = '应用配置数据(保留)' } }
-    if ($p -match '\\users\\[^\\]+\\appdata\\local') { return @{Category = '应用本地数据'; Cleanable = '否'; Reason = '应用本地数据(多数保留)' } }
+    # —— AppData 条件保留（动态核查已装软件，覆盖 Local/LocalLow/Roaming 三级）——
+    $appDisp = Classify-AppData -Path $fi.FullName -Scheme 'C' -Aggressive:$Aggressive
+    if ($appDisp) { return $appDisp }
     if ($p -match '\\users\\[^\\]+\\downloads\\') { return @{Category = '下载文件'; Cleanable = '谨慎'; Reason = '下载目录(需用户确认)' } }
     if ($p -match '\\users\\[^\\]+\\(documents|pictures|desktop|videos|music|contacts|links)\\') {
         return @{Category = '用户重要数据'; Cleanable = '否'; Reason = '用户文档/媒体(保留)' } }
@@ -703,6 +779,9 @@ function Classify-D {
             return @{Category = '通讯软件缓存/日志'; Cleanable = '需确认'; Reason = '通讯软件缓存/日志(需确认避免误删)' } }
         return @{Category = '通讯软件用户数据'; Cleanable = '保留'; Reason = '通讯软件用户数据/接收文件(禁止误删)' }
     }
+    # —— AppData 条件保留（动态核查已装软件，覆盖 Local/LocalLow/Roaming 三级）——
+    $appDisp = Classify-AppData -Path $fi.FullName -Scheme 'D' -Aggressive:$Aggressive
+    if ($appDisp) { return $appDisp }
     if ($WorkRoot -and (Test-PathPrefix -Path $fi.FullName -Prefix $WorkRoot)) {
         if (@($script:WorkKeepExtensions) -contains $ext) {
             return @{Category = '工作目录受保护文件'; Cleanable = '保留'; Reason = '工作目录禁止删除类型(Office/图片/音视频/TXT/MD/PDF/网页/压缩)' }
@@ -730,6 +809,38 @@ function Classify-D {
         return @{Category = '其他/未知(激进模式)'; Cleanable = '需确认'; Reason = '未分类文件(激进模式标记为需确认)' }
     }
     return @{Category = '其他/未知'; Cleanable = '保留'; Reason = '未分类(多数保留)' }
+}
+
+# ===================== AppData 条件保留分类（规则#2/#3/#4） =====================
+# 覆盖 AppData 三级：Local / LocalLow / Roaming。
+#   字体路径(规则#2)          -> 保留
+#   系统/内置子目录           -> 保留
+#   匹配本机已装/绿色部署软件  -> 保留
+#   孤儿(未匹配)             -> 需确认（保守，疑似卸载残留）
+# 挂载点：在 Test-KnownJunkTarget 之后调用，保住 fontcache/wer/deliveryoptimization 等已知垃圾热点。
+function Classify-AppData {
+    param([string]$Path, [string]$Scheme, [switch]$Aggressive)
+    $p = $Path.ToLower()
+    if ($p -notmatch '\\appdata\\(local|locallow|roaming)\\') { return $null }
+    # 规则#2：用户字体目录（AppData\Local\Microsoft\Windows\Fonts）一律保留
+    if ($p -match '\\appdata\\local\\microsoft\\windows\\fonts') {
+        return @{ Category = '用户字体'; Cleanable = $(if ($Scheme -eq 'C') { '否' } else { '保留' }); Reason = '用户字体目录(AppData\Local\Microsoft\Windows\Fonts)，禁止删除(规则#2)' }
+    }
+    if ($p -match '\\appdata\\(local|locallow|roaming)\\([^\\]+)') {
+        $appSeg = $Matches[2]
+        # 系统/内置子目录（即使未匹配已装软件也保留）
+        if ($script:SystemAppDataDirs -contains $appSeg) {
+            return @{ Category = '系统/内置 AppData'; Cleanable = $(if ($Scheme -eq 'C') { '否' } else { '保留' }); Reason = ('系统/内置 AppData 子目录({0})，保留' -f $appSeg) }
+        }
+        # 已装软件/绿色部署：匹配则保留
+        $sw = Test-InstalledSoftwareMatch -AppSeg $appSeg
+        if ($sw) {
+            return @{ Category = '已装软件数据'; Cleanable = $(if ($Scheme -eq 'C') { '否' } else { '保留' }); Reason = ('动态核查：本机已装/绿色部署软件 <{0}>，其 AppData 数据保留(规则#3/#4)' -f $sw) }
+        }
+        # 孤儿：未匹配任何已装软件，疑似卸载残留，保守标记需确认
+        return @{ Category = 'AppData 孤儿(疑似卸载残留)'; Cleanable = $(if ($Scheme -eq 'C') { '谨慎' } else { '需确认' }); Reason = ('AppData 子目录({0})未匹配任何已装软件/绿色部署，疑似卸载残留，需确认后再删(规则#3)' -f $appSeg) }
+    }
+    return $null
 }
 
 # ===================== 自动清理目录：清空直接子项、保留目录壳 =====================
@@ -1306,7 +1417,40 @@ function New-MarkdownReport {
     return $sb.ToString()
 }
 
+# ===================== AppData 条件保留核查表（规则#4 动态核查透明性） =====================
+function Get-AppDataProtectionMapMarkdown {
+    $appData = Join-Path $env:USERPROFILE 'AppData'
+    $levels = @('Local', 'LocalLow', 'Roaming')
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('## AppData 条件保留核查（动态已装软件清单）')
+    [void]$sb.AppendLine()
+    [void]$sb.AppendLine('| 级别 | 子目录 | 处置 | 匹配软件 / 原因 |')
+    [void]$sb.AppendLine('| --- | --- | --- | --- |')
+    foreach ($lv in $levels) {
+        $dir = Join-Path $appData $lv
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        try { $subs = @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) }
+        catch { $subs = @() }
+        if ($subs.Count -eq 0) { [void]$sb.AppendLine(('| {0} | (无子目录) | - | - |' -f $lv)); continue }
+        foreach ($s in $subs) {
+            $ns = $s.ToLower()
+            $disp = '需确认'; $reason = '未匹配已装软件(疑似卸载残留)'
+            if ($s -eq 'Fonts') { $disp = '保留'; $reason = '用户字体' }
+            elseif ($script:SystemAppDataDirs -contains $ns) { $disp = '保留'; $reason = '系统/内置' }
+            else {
+                $sw = Test-InstalledSoftwareMatch -AppSeg $s
+                if ($sw) { $disp = '保留'; $reason = ('已装软件 <{0}>' -f $sw) }
+            }
+            [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f $lv, ($s -replace '\|', '/'), $disp, $reason))
+        }
+    }
+    [void]$sb.AppendLine()
+    return $sb.ToString()
+}
+
 $md = New-MarkdownReport -PlanDelete $planDelete -PlanConfirm $planConfirm -PlanSafe $planSafe -PlanGuarded $planGuarded -LoadedFiles $loadedFiles -SafeRoots $SafeRoots -SystemProtectedRoots $SystemProtectedRoots -Mode $Mode -WhatIf $WhatIf -ScanGenerated $scanGenerated
+# 追加 AppData 条件保留核查表（动态已装软件清单：保留原因透明化，满足规则#4）
+$md += (Get-AppDataProtectionMapMarkdown)
 [System.IO.File]::WriteAllText($OutMd, $md, [System.Text.UTF8Encoding]::new($true))
 
 # 完整清单 CSV（逐文件，绝对路径不丢失，供一致性校验）
